@@ -366,15 +366,15 @@ function submitName() {
     nameSubmit.disabled = true;
     nameSubmit.textContent = 'Joining...';
     
-    log(`Joining room ${roomId} as controller with name: ${playerName}`);
+    console.log(`Joining room ${roomId} as controller with name: ${playerName}`);
     
-    // Join the room as a controller
+    // CRITICAL FIX: Explicitly join as a controller with correct parameters
     socket.emit('joinRoom', {
       roomId: roomId,
       name: playerName,
-      isController: true,  // Explicitly mark as controller
-      isHost: false,
-      isSpectator: false
+      isController: true,  // Must be true to be counted as a player
+      isHost: false,       // Must be false since this is a player
+      isSpectator: false   // Must be false to participate
     });
     
     // Add timeout to prevent UI from getting stuck

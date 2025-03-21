@@ -631,28 +631,33 @@ socket.on('joinResponse', (data) => {
 });
 
 socket.on('roomUpdate', (data) => {
-  log('Room update received:', data);
-  
-  players = data.players;
-  
-  // Update UI
-  updatePlayerList();
-  updateGameInfo();
-  
-  // Update player count in QR modal
-  if (isHost && qrModal.style.display === 'flex') {
-    // Count actual connected controllers (not hosts or disconnected)
+    console.log('Room update received:', data);
+    
+    // Store the players array
+    players = data.players || [];
+    
+    // Update player lists UI
+    updatePlayerList();
+    updateGameInfo();
+    
+    // Count connected non-host players
     const connectedPlayers = players.filter(p => p.connected && !p.isHost).length;
-    playerCount.textContent = connectedPlayers;
+    console.log(`Room has ${connectedPlayers} connected players`);
     
-    log(`Updating player count display to: ${connectedPlayers}`);
-    
-    // Enable start button if we have at least one connected player
-    startGameBtn.disabled = connectedPlayers === 0 || gameStarted;
-    
-    updatePlayerListInModal();
-  }
-});
+    // Update QR code modal and player count if it's visible
+    if (isHost) {
+      // Update player count display regardless of modal visibility
+      playerCount.textContent = connectedPlayers;
+      
+      // Update start button state based on player count
+      startGameBtn.disabled = (connectedPlayers === 0) || gameStarted;
+      
+      // Update player list in modal if it's open
+      if (qrModal.style.display === 'flex') {
+        updatePlayerListInModal();
+      }
+    }
+  });
 
 socket.on('gameStarted', (data) => {
   log('Game started:', data);

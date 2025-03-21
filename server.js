@@ -322,7 +322,12 @@ io.on('connection', (socket) => {
       socket.join(roomId);
       socket.currentRoom = roomId;
       
-      logDebug(`Controller joined room ${roomId} as ${playerName}`);
+      console.log(`Controller joined room ${roomId} as ${playerName}`);
+      console.log(`Room players:`, Object.keys(room.players).length);
+      
+      // Count connected players
+      const connectedPlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
+      console.log(`Room ${roomId} now has ${connectedPlayers.length} connected players`);
       
       // Send success response
       socket.emit('joinResponse', {
@@ -332,12 +337,21 @@ io.on('connection', (socket) => {
         gameState: room.status === 'playing' ? room.gameState : null
       });
       
-      // Broadcast room update
-      broadcastRoomUpdate(roomId);
+      // CRITICAL FIX: Send updated room data to all clients in the room
+      const playerList = Object.values(room.players).map(p => ({
+        id: p.id,
+        name: p.name,
+        connected: p.connected,
+        isHost: p.isHost
+      }));
       
-      // Log the current players in the room for debugging
-      const connectedPlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
-      logDebug(`Room ${roomId} now has ${connectedPlayers.length} connected players (excluding host)`);
+      // Send direct update to all clients in the room
+      io.to(roomId).emit('roomUpdate', {
+        roomId: roomId,
+        players: playerList,
+        playerCount: connectedPlayers.length,
+        status: room.status
+      });
       
       return;
     }
