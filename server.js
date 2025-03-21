@@ -2,80 +2,75 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
+const path = require('path');
 
-// Serve static files
-app.use(express.static('public'));
+// Serve static files from the public directory
+app.use(express.static(path.join(__dirname, 'public')));
 
-// In-memory storage for game rooms and player data
-// This is more suitable for real-time games than SQLite
+// In-memory storage for game rooms
 const gameRooms = new Map();
+
+// Debug mode
+const DEBUG = true;
+
+function logDebug(message, obj = null) {
+  if (DEBUG) {
+    if (obj) {
+      console.log(`[DEBUG] ${message}`, obj);
+    } else {
+      console.log(`[DEBUG] ${message}`);
+    }
+  }
+}
 
 // Generate unique room ID
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Clean up empty rooms (runs every 5 minutes)
-function cleanupEmptyRooms() {
-  for (const [roomId, room] of gameRooms.entries()) {
-    // Remove rooms with no connected players
-    const connectedPlayers = Object.values(room.players).filter(p => p.connected);
-    if (connectedPlayers.length === 0 && room.status === 'waiting') {
-      console.log(`Cleaning up empty room: ${roomId}`);
-      gameRooms.delete(roomId);
-    }
-  }
-}
-
-// Set interval for room cleanup
-setInterval(cleanupEmptyRooms, 300000); // 5 minutes
-
-// Get array of players from a room
-function getPlayersArray(room) {
-  return Object.values(room.players).map(player => ({
-    id: player.id,
-    name: player.name,
-    connected: player.connected,
-    isHost: player.isHost
-  }));
-}
-
-// Broadcast room update to all clients in a room
-function broadcastRoomUpdate(roomId) {
-  const room = gameRooms.get(roomId);
-  if (!room) return;
-
-  io.to(roomId).emit('roomUpdate', {
-    roomId: roomId,
-    players: getPlayersArray(room),
-    status: room.status
-  });
-}
-
-// Get public room list (for lobby)
-function getPublicRoomList() {
+// Helper function to get all active rooms
+function getActiveRooms() {
   const rooms = [];
   for (const [roomId, room] of gameRooms.entries()) {
-    if (room.status === 'waiting') {
-      const connectedPlayers = Object.values(room.players).filter(p => p.connected);
-      rooms.push({
-        id: roomId,
-        status: room.status,
-        players: connectedPlayers.length
-      });
-    }
+    const connectedPlayers = Object.values(room.players).filter(p => p.connected);
+    rooms.push({
+      id: roomId,
+      status: room.status,
+      players: connectedPlayers.length
+    });
   }
   return rooms;
 }
 
+// Helper function to broadcast room updates
+function broadcastRoomUpdate(roomId) {
+  const room = gameRooms.get(roomId);
+  if (!room) return;
+
+  const players = Object.values(room.players).map(p => ({
+    id: p.id,
+    name: p.name,
+    connected: p.connected,
+    isHost: p.isHost
+  }));
+
+  io.to(roomId).emit('roomUpdate', {
+    roomId: roomId,
+    players: players,
+    status: room.status
+  });
+}
+
 // Socket.io connection handling
 io.on('connection', (socket) => {
-  console.log(`Client connected: ${socket.id}`);
+  logDebug(`Client connected: ${socket.id}`);
   
   // Create a new room
   socket.on('createRoom', (data) => {
     const roomId = generateRoomId();
     const hostToken = data.hostToken || Math.random().toString(36).substring(2, 15);
+    
+    logDebug(`Creating room: ${roomId} with host: ${socket.id}`);
     
     // Create new room in memory
     gameRooms.set(roomId, {
@@ -103,31 +98,39 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     socket.currentRoom = roomId;
     
+    logDebug(`Room created successfully: ${roomId}`);
+    logDebug(`Current rooms:`, Array.from(gameRooms.keys()));
+    
     // Send room creation response
     socket.emit('roomCreated', {
       roomId: roomId,
-      hostToken: hostToken,
-      players: getPlayersArray(gameRooms.get(roomId))
+      hostToken: hostToken
     });
     
     console.log(`Room created: ${roomId} by ${socket.id}`);
     
     // Update room list for all clients in lobby
-    io.emit('roomList', getPublicRoomList());
+    io.emit('roomList', getActiveRooms());
   });
   
   // Get Room List
   socket.on('getRoomList', () => {
-    socket.emit('roomList', getPublicRoomList());
+    const activeRooms = getActiveRooms();
+    logDebug(`Sending room list:`, activeRooms);
+    socket.emit('roomList', activeRooms);
   });
   
   // Join an existing room
   socket.on('joinRoom', (data) => {
     const { roomId, name, isController, isHost, isSpectator, hostToken } = data;
     
+    logDebug(`Join request for room ${roomId} by ${socket.id} as ${isHost ? 'host' : (isController ? 'controller' : 'spectator')}`);
+    logDebug(`Available rooms:`, Array.from(gameRooms.keys()));
+    
     // Validate room exists
     const room = gameRooms.get(roomId);
     if (!room) {
+      logDebug(`Room not found: ${roomId}`);
       console.error(`Room not found: ${roomId}`);
       socket.emit('joinResponse', { 
         success: false, 
@@ -136,6 +139,8 @@ io.on('connection', (socket) => {
       });
       return;
     }
+    
+    logDebug(`Room ${roomId} found, processing join request`);
     
     // Handle joining as host
     if (isHost) {
@@ -166,6 +171,8 @@ io.on('connection', (socket) => {
         };
       }
       
+      logDebug(`Host joined room ${roomId} successfully`);
+      
       // Send success response
       socket.emit('joinResponse', {
         success: true,
@@ -183,6 +190,8 @@ io.on('connection', (socket) => {
     if (isSpectator) {
       socket.join(roomId);
       socket.currentRoom = roomId;
+      
+      logDebug(`Spectator joined room ${roomId}`);
       
       socket.emit('joinResponse', {
         success: true,
@@ -220,6 +229,8 @@ io.on('connection', (socket) => {
       socket.join(roomId);
       socket.currentRoom = roomId;
       
+      logDebug(`Controller joined room ${roomId} as ${playerName}`);
+      
       // Send success response
       socket.emit('joinResponse', {
         success: true,
@@ -244,7 +255,12 @@ io.on('connection', (socket) => {
   // Start Game
   socket.on('startGame', (roomId) => {
     const room = gameRooms.get(roomId);
-    if (!room) return;
+    if (!room) {
+      logDebug(`Start game request for non-existent room: ${roomId}`);
+      return;
+    }
+    
+    logDebug(`Start game requested for room ${roomId} by ${socket.id}`);
     
     // Check if socket is host
     const player = room.players[socket.id];
@@ -276,6 +292,8 @@ io.on('connection', (socket) => {
       room.gameState.scores[player.id] = 0;
     });
     
+    logDebug(`Game starting in room ${roomId}, first player: ${firstPlayer.name}`);
+    
     // Send game started event to all clients
     io.to(roomId).emit('gameStarted', {
       firstPlayer: firstPlayer.id,
@@ -283,8 +301,11 @@ io.on('connection', (socket) => {
       gameState: room.gameState
     });
     
+    // Track active player
+    room.activePlayerId = firstPlayer.id;
+    
     // Update room list (no longer joinable as new room)
-    io.emit('roomList', getPublicRoomList());
+    io.emit('roomList', getActiveRooms());
   });
   
   // Handle throw
@@ -310,26 +331,40 @@ io.on('connection', (socket) => {
       // Check if player has lost (all cups hit)
       const playerLost = room.gameState.cups[playerId].every(cup => !cup);
       
-      // Update scores - award a point to the active player
+      // Get the active player who made the throw (not the one who was hit)
       const activePlayers = Object.values(room.players)
         .filter(p => p.connected && !p.isHost)
         .filter(p => p.id !== playerId); // Exclude the player who was hit
       
-      // Get the active player (the one who's not the hit player)
       if (activePlayers.length > 0) {
         const activePlayer = activePlayers[0];
+        // Award a point to the active player
         room.gameState.scores[activePlayer.id] = (room.gameState.scores[activePlayer.id] || 0) + 1;
       }
       
       if (playerLost) {
         // Check if game is over
-        handleGameEnd(room, roomId);
+        const winner = Object.entries(room.gameState.scores)
+          .sort((a, b) => b[1] - a[1])
+          .map(([id, score]) => ({ id, score }))[0];
+        
+        if (winner) {
+          const winningPlayer = room.players[winner.id];
+          io.to(roomId).emit('playerWon', {
+            player: winningPlayer,
+            isTie: false,
+            scores: room.gameState.scores
+          });
+          room.status = 'ended';
+        }
       } else {
         // Change turn
         const activePlayer = Object.values(room.players)
           .find(p => p.connected && p.id === playerId);
         
         if (activePlayer) {
+          room.activePlayerId = activePlayer.id;
+          
           io.to(roomId).emit('turnChange', {
             activePlayer: activePlayer,
             gameState: room.gameState
@@ -350,7 +385,7 @@ io.on('connection', (socket) => {
       .filter(p => p.connected && !p.isHost);
     
     if (activePlayers.length >= 2) {
-      // Simple round-robin: find current active player and select next
+      // Find current active player index
       const currentActiveIdx = activePlayers.findIndex(p => p.id === room.activePlayerId);
       const nextIdx = (currentActiveIdx + 1) % activePlayers.length;
       const nextPlayer = activePlayers[nextIdx];
@@ -378,6 +413,8 @@ io.on('connection', (socket) => {
       return;
     }
     
+    logDebug(`Resetting game in room ${roomId}`);
+    
     // Reset game state
     room.status = 'waiting';
     room.gameState = {
@@ -395,11 +432,13 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('gameReset');
     
     // Update room list (now joinable again)
-    io.emit('roomList', getPublicRoomList());
+    io.emit('roomList', getActiveRooms());
   });
   
   // Handle disconnection
   socket.on('disconnect', () => {
+    logDebug(`Client disconnected: ${socket.id}`);
+    
     if (socket.currentRoom) {
       const roomId = socket.currentRoom;
       const room = gameRooms.get(roomId);
@@ -413,6 +452,7 @@ io.on('connection', (socket) => {
         
         if (isHost && room.status === 'waiting') {
           // Close room
+          logDebug(`Host disconnected, closing room ${roomId}`);
           io.to(roomId).emit('roomClosed', { message: 'Host disconnected' });
           gameRooms.delete(roomId);
         } else if (room.status === 'playing') {
@@ -450,44 +490,33 @@ io.on('connection', (socket) => {
         broadcastRoomUpdate(roomId);
       }
       
+      // Clean up completely empty rooms
+      for (const [roomId, room] of gameRooms.entries()) {
+        const connectedPlayers = Object.values(room.players).filter(p => p.connected);
+        if (connectedPlayers.length === 0) {
+          logDebug(`Removing empty room: ${roomId}`);
+          gameRooms.delete(roomId);
+        }
+      }
+      
       // Update room list
-      io.emit('roomList', getPublicRoomList());
+      io.emit('roomList', getActiveRooms());
     }
   });
 });
 
-// Helper function to handle game end
-function handleGameEnd(room, roomId) {
-  // Get scores
-  const scores = room.gameState.scores;
-  
-  // Find player with highest score
-  let highestScore = 0;
-  let winners = [];
-  
-  Object.entries(scores).forEach(([playerId, score]) => {
-    if (score > highestScore) {
-      highestScore = score;
-      winners = [room.players[playerId]];
-    } else if (score === highestScore) {
-      winners.push(room.players[playerId]);
-    }
-  });
-  
-  // Check if we have a tie
-  const isTie = winners.length > 1;
-  
-  // Send win event
-  io.to(roomId).emit('playerWon', {
-    player: winners[0],
-    isTie: isTie,
-    tiedPlayers: isTie ? winners : null,
-    scores: scores
-  });
-  
-  // Reset game state but keep room open
-  room.status = 'ended';
-}
+// Routes
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/game.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'game.html'));
+});
+
+app.get('/controller.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'controller.html'));
+});
 
 // Start the server
 const PORT = process.env.PORT || 3001;

@@ -5,11 +5,25 @@ const isHost = urlParams.get('host') === 'true';
 const isSpectator = urlParams.get('spectator') === 'true';
 const hostToken = urlParams.get('token');
 
+// Debug mode
+const DEBUG = true;
+function log(message, obj = null) {
+  if (DEBUG) {
+    if (obj) {
+      console.log(`[GAME] ${message}`, obj);
+    } else {
+      console.log(`[GAME] ${message}`);
+    }
+  }
+}
+
 // Validate room parameter
 if (!roomId) {
   alert('No room ID provided.');
   window.location.href = '/';
 }
+
+log(`Initializing game for room: ${roomId}, host: ${isHost}, spectator: ${isSpectator}`);
 
 // Socket.io connection
 const socket = io();
@@ -257,6 +271,18 @@ showQRButton.addEventListener('click', () => {
 });
 document.body.appendChild(showQRButton);
 
+// Connection status indicator
+const connectionStatus = document.createElement('div');
+connectionStatus.style.position = 'absolute';
+connectionStatus.style.top = '10px';
+connectionStatus.style.right = '10px';
+connectionStatus.style.width = '10px';
+connectionStatus.style.height = '10px';
+connectionStatus.style.borderRadius = '50%';
+connectionStatus.style.backgroundColor = '#ccc';
+connectionStatus.style.zIndex = '110';
+document.body.appendChild(connectionStatus);
+
 // Update UI functions
 function updateGameInfo() {
   let html = `<h2>Game Room: ${roomId}</h2>`;
@@ -390,7 +416,11 @@ function showQRCode() {
     qrRoomID.textContent = roomId;
     
     // Generate QR code with the room ID
-    const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
+    // Make sure URL includes the full path including origin
+    const origin = window.location.origin;
+    const joinUrl = `${origin}/controller.html?room=${roomId}`;
+    
+    log(`Generating QR code for URL: ${joinUrl}`);
     
     new QRCode(qrcode, {
       text: joinUrl,
@@ -496,6 +526,8 @@ ballBody.addEventListener('collide', (event) => {
 // Button event listeners
 startGameBtn.addEventListener('click', () => {
   if (isHost) {
+    log(`Start game button clicked for room ${roomId}`);
+    
     // Only allow starting if we have at least 1 player
     const connectedPlayers = players.filter(p => p.connected && !p.isHost);
     
@@ -528,9 +560,12 @@ returnToLobbyBtn.addEventListener('click', () => {
 
 // Socket connection and event handling
 socket.on('connect', () => {
-  console.log('Connected to server');
+  log('Connected to server');
+  connectionStatus.style.backgroundColor = '#4CAF50'; // Green when connected
   
   // Join room with appropriate role
+  log(`Joining room ${roomId} as ${isHost ? 'host' : (isSpectator ? 'spectator' : 'unknown')}`);
+  
   socket.emit('joinRoom', {
     roomId: roomId,
     isHost: isHost,
@@ -542,12 +577,13 @@ socket.on('connect', () => {
 socket.on('joinResponse', (data) => {
   if (!data.success) {
     // Handle failed join
+    log(`Failed to join room: ${data.message}`);
     alert(data.message || 'Failed to join the game room.');
     window.location.href = '/';
     return;
   }
   
-  console.log('Successfully joined room:', data);
+  log('Successfully joined room:', data);
   
   // If host, show QR code for player joining
   if (isHost) {
@@ -566,7 +602,7 @@ socket.on('joinResponse', (data) => {
 });
 
 socket.on('roomUpdate', (data) => {
-  console.log('Room update:', data);
+  log('Room update:', data);
   
   players = data.players;
   
@@ -586,7 +622,7 @@ socket.on('roomUpdate', (data) => {
 });
 
 socket.on('gameStarted', (data) => {
-  console.log('Game started:', data);
+  log('Game started:', data);
   
   // Close QR modal
   qrModal.style.display = 'none';
@@ -660,7 +696,7 @@ socket.on('throw', (data) => {
 });
 
 socket.on('turnChange', (data) => {
-  console.log('Turn change:', data);
+  log('Turn change:', data);
   
   // Update active player
   activePlayer = data.activePlayer;
@@ -758,7 +794,7 @@ socket.on('playerWon', (data) => {
 });
 
 socket.on('playerDisconnected', (data) => {
-  console.log('Player disconnected:', data);
+  log('Player disconnected:', data);
   
   // Update player in local list
   const disconnectedPlayer = players.find(p => p.id === data.playerId);
@@ -785,7 +821,7 @@ socket.on('playerDisconnected', (data) => {
 });
 
 socket.on('gameReset', () => {
-  console.log('Game reset');
+  log('Game reset');
   
   // Reset game state
   gameStarted = false;
@@ -821,6 +857,8 @@ socket.on('roomClosed', () => {
 });
 
 socket.on('disconnect', () => {
+  log('Disconnected from server');
+  connectionStatus.style.backgroundColor = '#f44336'; // Red when disconnected
   gameStatus.textContent = 'Disconnected from server. Trying to reconnect...';
 });
 
