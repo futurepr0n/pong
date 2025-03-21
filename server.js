@@ -58,7 +58,7 @@ io.on('connection', (socket) => {
   socket.on('createRoom', (data) => {
     const roomId = generateRoomId();
     const joinUrl = `${BASE_URL}/controller.html?room=${roomId}`;
-    const hostToken = data?.hostToken || null;
+    const hostToken = (data && data.hostToken) || null;
     
     gameRooms.set(roomId, {
       id: roomId,
