@@ -7,7 +7,11 @@ const Database = require('better-sqlite3');
 // Open the database
 const db = new Database('game_rooms.db', { verbose: console.log });
 
-// Create tables if they don't exist
+// Create tables with foreign key support
+db.prepare(`
+  PRAGMA foreign_keys = ON;
+`).run();
+
 db.prepare(`
   CREATE TABLE IF NOT EXISTS rooms (
     room_id TEXT PRIMARY KEY,
@@ -26,7 +30,7 @@ db.prepare(`
     is_host BOOLEAN DEFAULT 0,
     is_connected BOOLEAN DEFAULT 1,
     PRIMARY KEY (room_id, player_id),
-    FOREIGN KEY (room_id) REFERENCES rooms (room_id)
+    FOREIGN KEY (room_id) REFERENCES rooms (room_id) ON DELETE CASCADE
   )
 `).run();
 
@@ -52,7 +56,7 @@ io.on('connection', (socket) => {
       Math.random().toString(36).substring(2, 15) + 
       Math.random().toString(36).substring(2, 15);
     
-    try {
+    const transaction = db.transaction(() => {
       // Insert room into database
       const insertRoom = db.prepare(`
         INSERT INTO rooms (room_id, host_token, status) 
@@ -67,21 +71,53 @@ io.on('connection', (socket) => {
       `);
       insertPlayer.run(roomId, socket.id, 'Host');
       
-      socket.join(roomId);
-      socket.currentRoom = roomId;
+      return roomId;
+    });
+    
+    try {
+      const createdRoomId = transaction();
+      
+      socket.join(createdRoomId);
+      socket.currentRoom = createdRoomId;
       
       // Send room creation response
       socket.emit('roomCreated', {
-        roomId: roomId, 
-        joinUrl: `${BASE_URL}/controller.html?room=${roomId}`,
+        roomId: createdRoomId, 
+        joinUrl: `${BASE_URL}/controller.html?room=${createdRoomId}`,
         hostToken: hostToken,
         players: []
       });
       
-      console.log(`Room created: ${roomId} by ${socket.id}`);
+      console.log(`Room created: ${createdRoomId} by ${socket.id}`);
     } catch (error) {
       console.error('Room creation error:', error);
       socket.emit('error', 'Failed to create room');
+    }
+  });
+  
+  // Get Room List
+  socket.on('getRoomList', () => {
+    try {
+      // Get active rooms with player count
+      const getRooms = db.prepare(`
+        SELECT r.room_id, r.status, 
+               COUNT(rp.player_id) as player_count
+        FROM rooms r
+        LEFT JOIN room_players rp ON r.room_id = rp.room_id AND rp.is_connected = 1
+        WHERE r.status = 'waiting'
+        GROUP BY r.room_id
+      `);
+      
+      const rooms = getRooms.all().map(room => ({
+        id: room.room_id,
+        status: room.status,
+        players: Array(room.player_count).fill({}) // Placeholder for player data
+      }));
+      
+      socket.emit('roomList', rooms);
+    } catch (error) {
+      console.error('Error getting room list:', error);
+      socket.emit('error', 'Failed to retrieve room list');
     }
   });
   
@@ -115,87 +151,97 @@ io.on('connection', (socket) => {
         return;
       }
       
-      // Add or update player in the room
-      if (isController) {
-        // Check if player already exists
-        const existingPlayer = db.prepare(`
-          SELECT * FROM room_players 
-          WHERE room_id = ? AND player_id = ?
-        `).get(room.room_id, socket.id);
-        
-        if (existingPlayer) {
-          // Update existing player
-          db.prepare(`
-            UPDATE room_players 
-            SET name = ?, is_connected = 1 
+      // Transaction for adding/updating player
+      const transaction = db.transaction(() => {
+        if (isController) {
+          // Check if player already exists
+          const existingPlayer = db.prepare(`
+            SELECT * FROM room_players 
             WHERE room_id = ? AND player_id = ?
-          `).run(
-            name || existingPlayer.name, 
-            room.room_id, 
-            socket.id
-          );
-        } else {
-          // Insert new player
+          `).get(room.room_id, socket.id);
+          
+          if (existingPlayer) {
+            // Update existing player
+            db.prepare(`
+              UPDATE room_players 
+              SET name = ?, is_connected = 1 
+              WHERE room_id = ? AND player_id = ?
+            `).run(
+              name || existingPlayer.name, 
+              room.room_id, 
+              socket.id
+            );
+          } else {
+            // Insert new player
+            db.prepare(`
+              INSERT INTO room_players (room_id, player_id, name, is_host) 
+              VALUES (?, ?, ?, 0)
+            `).run(
+              room.room_id, 
+              socket.id, 
+              name || `Player ${Date.now()}`
+            );
+          }
+          
+          // Get player details
+          const playerInfo = db.prepare(`
+            SELECT * FROM room_players 
+            WHERE room_id = ? AND player_id = ?
+          `).get(room.room_id, socket.id);
+          
+          return { 
+            success: true, 
+            roomId: room.room_id,
+            playerInfo: playerInfo,
+            isController: true
+          };
+        } else if (isHost) {
+          // Update host information
           db.prepare(`
-            INSERT INTO room_players (room_id, player_id, name, is_host) 
-            VALUES (?, ?, ?, 0)
-          `).run(
-            room.room_id, 
-            socket.id, 
-            name || `Player ${Date.now()}`
-          );
+            UPDATE rooms 
+            SET host_token = ? 
+            WHERE room_id = ?
+          `).run(hostToken || room.host_token, room.room_id);
+          
+          return {
+            success: true,
+            roomId: room.room_id,
+            isHost: true,
+            joinUrl: `${BASE_URL}/controller.html?room=${room.room_id}`
+          };
         }
+      });
+      
+      // Execute transaction
+      const result = transaction();
+      
+      if (result) {
+        // Join the socket room
+        socket.join(room.room_id);
+        socket.currentRoom = room.room_id;
         
-        // Get player details
-        const playerInfo = db.prepare(`
-          SELECT * FROM room_players 
-          WHERE room_id = ? AND player_id = ?
-        `).get(room.room_id, socket.id);
-        
-        socket.emit('joinResponse', { 
-          success: true, 
-          roomId: room.room_id,
-          playerInfo: playerInfo,
-          isController: true
-        });
-      } else if (isHost) {
-        // Update host information
+        // Update last active timestamp
         db.prepare(`
           UPDATE rooms 
-          SET host_token = ? 
+          SET last_active = CURRENT_TIMESTAMP 
           WHERE room_id = ?
-        `).run(hostToken || room.host_token, room.room_id);
+        `).run(room.room_id);
         
-        socket.emit('joinResponse', {
-          success: true,
+        // Emit join response
+        socket.emit('joinResponse', result);
+        
+        // Broadcast room update
+        const players = db.prepare(`
+          SELECT * FROM room_players 
+          WHERE room_id = ? AND is_connected = 1
+        `).all(room.room_id);
+        
+        io.to(room.room_id).emit('roomUpdate', {
           roomId: room.room_id,
-          isHost: true,
-          joinUrl: `${BASE_URL}/controller.html?room=${room.room_id}`
+          players: players,
+          status: room.status
         });
       }
-      
-      // Join the socket room
-      socket.join(room.room_id);
-      socket.currentRoom = room.room_id;
-      
-      // Update last active timestamp
-      db.prepare(`
-        UPDATE rooms 
-        SET last_active = CURRENT_TIMESTAMP 
-        WHERE room_id = ?
-      `).run(room.room_id);
-      
-      // Broadcast room update
-      const players = db.prepare(`
-        SELECT * FROM room_players 
-        WHERE room_id = ? AND is_connected = 1
-      `).all(room.room_id);
-      
-      io.to(room.room_id).emit('roomUpdate', {
-        roomId: room.room_id,
-        players: players,
-        status: room.status
-      });
       
     } catch (error) {
       console.error('Room join error:', error);
@@ -209,13 +255,22 @@ io.on('connection', (socket) => {
   
   // Periodic cleanup of old rooms
   function cleanupRooms() {
-    // Remove rooms older than 1 hour and not in active status
-    const cleanupStmt = db.prepare(`
-      DELETE FROM rooms 
-      WHERE status = 'waiting' AND 
-      last_active < datetime('now', '-1 hour')
-    `);
-    cleanupStmt.run();
+    const transaction = db.transaction(() => {
+      // Remove rooms older than 1 hour and not in active status
+      // This will cascade delete room_players due to ON DELETE CASCADE
+      const cleanupStmt = db.prepare(`
+        DELETE FROM rooms 
+        WHERE status = 'waiting' AND 
+        last_active < datetime('now', '-1 hour')
+      `);
+      cleanupStmt.run();
+    });
+    
+    try {
+      transaction();
+    } catch (error) {
+      console.error('Room cleanup error:', error);
+    }
   }
   
   // Run cleanup every 15 minutes
@@ -224,26 +279,35 @@ io.on('connection', (socket) => {
   // Handle disconnection
   socket.on('disconnect', () => {
     if (socket.currentRoom) {
-      // Mark player as disconnected
-      db.prepare(`
-        UPDATE room_players 
-        SET is_connected = 0 
-        WHERE room_id = ? AND player_id = ?
-      `).run(socket.currentRoom, socket.id);
-      
-      // Check if room is now empty
-      const remainingPlayers = db.prepare(`
-        SELECT COUNT(*) as count 
-        FROM room_players 
-        WHERE room_id = ? AND is_connected = 1
-      `).get(socket.currentRoom).count;
-      
-      if (remainingPlayers === 0) {
-        // Remove the room if no players are connected
+      const transaction = db.transaction(() => {
+        // Mark player as disconnected
         db.prepare(`
-          DELETE FROM rooms 
-          WHERE room_id = ?
-        `).run(socket.currentRoom);
+          UPDATE room_players 
+          SET is_connected = 0 
+          WHERE room_id = ? AND player_id = ?
+        `).run(socket.currentRoom, socket.id);
+        
+        // Check if room is now empty
+        const remainingPlayers = db.prepare(`
+          SELECT COUNT(*) as count 
+          FROM room_players 
+          WHERE room_id = ? AND is_connected = 1
+        `).get(socket.currentRoom).count;
+        
+        // If no players are connected, remove the room
+        if (remainingPlayers === 0) {
+          // This will automatically remove associated players due to CASCADE
+          db.prepare(`
+            DELETE FROM rooms 
+            WHERE room_id = ?
+          `).run(socket.currentRoom);
+        }
+      });
+      
+      try {
+        transaction();
+      } catch (error) {
+        console.error('Disconnection handling error:', error);
       }
     }
   });
