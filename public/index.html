@@ -2,11 +2,154 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Ping Pong Throw Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ping Pong Throw Game - Lobby</title>
+  <style>
+    body {
+      font-family: 'Arial', sans-serif;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background-color: #f0f0f0;
+      color: #333;
+    }
+    .container {
+      width: 80%;
+      max-width: 800px;
+      text-align: center;
+    }
+    h1 {
+      color: #4CAF50;
+      margin-bottom: 30px;
+    }
+    .create-room-btn {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      padding: 15px 30px;
+      font-size: 18px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-bottom: 20px;
+      transition: background-color 0.3s;
+    }
+    .create-room-btn:hover {
+      background-color: #45a049;
+    }
+    .room-list {
+      width: 100%;
+      margin-top: 30px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      padding: 15px;
+      background-color: white;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .room-item {
+      padding: 10px;
+      border-bottom: 1px solid #eee;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .room-item:last-child {
+      border-bottom: none;
+    }
+    .join-btn {
+      background-color: #2196F3;
+      color: white;
+      border: none;
+      padding: 8px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .join-btn:hover {
+      background-color: #0b7dda;
+    }
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-content {
+      background-color: white;
+      padding: 20px;
+      border-radius: 5px;
+      max-width: 500px;
+      width: 80%;
+      text-align: center;
+    }
+    .close {
+      color: #aaa;
+      float: right;
+      font-size: 28px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    .close:hover {
+      color: black;
+    }
+    .qr-container {
+      margin: 20px 0;
+    }
+    #qrcode {
+      margin: 0 auto;
+      width: 200px;
+      height: 200px;
+    }
+    .room-info {
+      margin-bottom: 15px;
+      font-size: 18px;
+      font-weight: bold;
+    }
+  </style>
 </head>
 <body>
-  <h1>Welcome to Ping Pong Throw Game</h1>
-  <p><a href="/game.html">Play the Game</a></p>
-  <p><a href="/controller.html">Use the Controller</a></p>
+  <div class="container">
+    <h1>Ping Pong Throw Game</h1>
+    <button class="create-room-btn" id="createRoomBtn">Create Game Room</button>
+    
+    <div class="room-list" id="roomList">
+      <h2>Active Game Rooms</h2>
+      <div id="roomsContainer">
+        <!-- Rooms will be dynamically added here -->
+        <div class="room-item">
+          <span>No active rooms found.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QR Code Modal -->
+  <div class="modal" id="qrModal">
+    <div class="modal-content">
+      <span class="close" id="closeModal">&times;</span>
+      <h2>Join Game Room</h2>
+      <div class="room-info" id="roomInfo">Room: <span id="roomId"></span></div>
+      <p>Scan this QR code with your phone to join as a player:</p>
+      <div class="qr-container">
+        <div id="qrcode"></div>
+      </div>
+      <p>Waiting for players to join... (<span id="playerCount">0</span>/10)</p>
+      <button id="startGameBtn" disabled>Start Game</button>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="lobby.js"></script>
 </body>
 </html>

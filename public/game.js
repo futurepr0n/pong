@@ -1,3 +1,14 @@
+// Get room ID and host status from URL parameters
+const urlParams = new URLSearchParams(window.location.search);
+const roomId = urlParams.get('room');
+const isHost = urlParams.get('host') === 'true';
+const isSpectator = urlParams.get('spectator') === 'true';
+
+if (!roomId) {
+  alert('No room ID provided.');
+  window.location.href = '/';
+}
+
 // Scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
@@ -91,10 +102,7 @@ const backboardBody = new CANNON.Body({
 backboardBody.position.copy(backboardMesh.position);
 world.addBody(backboardBody);
 
-// Cups
-const cupRadius = 0.2;
-const cupHeight = 0.5;
-const cups = [];
+// Cup positions in triangle formation
 const cupPositions = [
     [0, 0, 2.5],             // Center front
     [0.45, 0, 2.5],          // Right front
@@ -104,7 +112,13 @@ const cupPositions = [
     [0, 0, 1.7]              // Back
 ];
 
-cupPositions.forEach((pos) => {
+// Cup setup function
+function createCups() {
+  const cups = [];
+  const cupRadius = 0.2;
+  const cupHeight = 0.5;
+
+  cupPositions.forEach((pos, index) => {
     // Visual mesh
     const cupGeometry = new THREE.CylinderGeometry(cupRadius, cupRadius, cupHeight, 32);
     const cupMeshMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
@@ -116,8 +130,8 @@ cupPositions.forEach((pos) => {
 
     // Physics body
     const cupBody = new CANNON.Body({
-        mass: 0, // Static body
-        material: cupMaterial
+      mass: 0, // Static body
+      material: cupMaterial
     });
     
     // Use cylinder shape for better collision
@@ -126,12 +140,16 @@ cupPositions.forEach((pos) => {
     world.addBody(cupBody);
 
     cups.push({ 
-        mesh: cupMesh, 
-        body: cupBody, 
-        position: pos,
-        active: true  // Flag to track if cup is still in play
+      mesh: cupMesh, 
+      body: cupBody, 
+      position: pos,
+      active: true,  // Flag to track if cup is still in play
+      index: index
     });
-});
+  });
+  
+  return cups;
+}
 
 // Ball
 const ballRadius = 0.05;
@@ -154,155 +172,439 @@ world.addBody(ballBody);
 // Socket.io connection
 const socket = io();
 
-// Visual feedback elements
-const throwFeedback = document.createElement('div');
-throwFeedback.style.position = 'absolute';
-throwFeedback.style.top = '20px';
-throwFeedback.style.left = '20px';
-throwFeedback.style.color = 'white';
-throwFeedback.style.fontSize = '18px';
-throwFeedback.style.fontFamily = 'Arial, sans-serif';
-throwFeedback.style.backgroundColor = 'rgba(0,0,0,0.5)';
-throwFeedback.style.padding = '10px';
-throwFeedback.style.borderRadius = '5px';
-document.body.appendChild(throwFeedback);
-
-// Score display
-const scoreDisplay = document.createElement('div');
-scoreDisplay.style.position = 'absolute';
-scoreDisplay.style.top = '20px';
-scoreDisplay.style.right = '20px';
-scoreDisplay.style.color = 'white';
-scoreDisplay.style.fontSize = '24px';
-scoreDisplay.style.fontFamily = 'Arial, sans-serif';
-scoreDisplay.style.backgroundColor = 'rgba(0,0,0,0.5)';
-scoreDisplay.style.padding = '10px';
-scoreDisplay.style.borderRadius = '5px';
-scoreDisplay.innerHTML = 'Score: 0';
-document.body.appendChild(scoreDisplay);
-
-// Game state
+// Game state variables
+let gameStarted = false;
 let ballInFlight = false;
 let lastThrowTime = 0;
 const resetDelay = 5000; // 5 seconds
-let score = 0;
-let throwsAttempted = 0;
+let activePlayer = null;
+let players = [];
+let playerCupStates = {}; // Map of player ID to cup states
+let currentCups = []; // Current set of cups in the scene
+let gameState = {
+  round: 1
+};
+
+// Create UI elements
+// Game info panel
+const gameInfo = document.createElement('div');
+gameInfo.style.position = 'absolute';
+gameInfo.style.top = '20px';
+gameInfo.style.left = '20px';
+gameInfo.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+gameInfo.style.color = 'white';
+gameInfo.style.padding = '15px';
+gameInfo.style.borderRadius = '5px';
+gameInfo.style.fontFamily = 'Arial, sans-serif';
+gameInfo.style.zIndex = '100';
+document.body.appendChild(gameInfo);
+
+// Player list panel
+const playerList = document.createElement('div');
+playerList.style.position = 'absolute';
+playerList.style.top = '20px';
+playerList.style.right = '20px';
+playerList.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+playerList.style.color = 'white';
+playerList.style.padding = '15px';
+playerList.style.borderRadius = '5px';
+playerList.style.fontFamily = 'Arial, sans-serif';
+playerList.style.zIndex = '100';
+document.body.appendChild(playerList);
+
+// Start button (only for host)
+const startButton = document.createElement('button');
+startButton.textContent = 'Start Game';
+startButton.style.position = 'absolute';
+startButton.style.bottom = '20px';
+startButton.style.left = '50%';
+startButton.style.transform = 'translateX(-50%)';
+startButton.style.padding = '15px 30px';
+startButton.style.fontSize = '18px';
+startButton.style.backgroundColor = '#4CAF50';
+startButton.style.color = 'white';
+startButton.style.border = 'none';
+startButton.style.borderRadius = '5px';
+startButton.style.cursor = 'pointer';
+startButton.style.display = isHost ? 'block' : 'none';
+startButton.style.zIndex = '100';
+document.body.appendChild(startButton);
+
+// QR code display for host
+const qrContainer = document.createElement('div');
+qrContainer.style.position = 'absolute';
+qrContainer.style.top = '50%';
+qrContainer.style.left = '50%';
+qrContainer.style.transform = 'translate(-50%, -50%)';
+qrContainer.style.backgroundColor = 'white';
+qrContainer.style.padding = '20px';
+qrContainer.style.borderRadius = '10px';
+qrContainer.style.textAlign = 'center';
+qrContainer.style.display = isHost ? 'block' : 'none';
+qrContainer.style.zIndex = '100';
+
+const qrTitle = document.createElement('h2');
+qrTitle.textContent = 'Scan to Join:';
+qrContainer.appendChild(qrTitle);
+
+const qrCode = document.createElement('div');
+qrCode.id = 'qrcode';
+qrContainer.appendChild(qrCode);
+
+const qrInfo = document.createElement('p');
+qrInfo.id = 'qrInfo';
+qrInfo.textContent = 'Room ID: ' + roomId;
+qrContainer.appendChild(qrInfo);
+
+document.body.appendChild(qrContainer);
+
+// Game status message
+const gameStatus = document.createElement('div');
+gameStatus.style.position = 'absolute';
+gameStatus.style.bottom = '80px';
+gameStatus.style.left = '50%';
+gameStatus.style.transform = 'translateX(-50%)';
+gameStatus.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+gameStatus.style.color = 'white';
+gameStatus.style.padding = '10px 20px';
+gameStatus.style.borderRadius = '5px';
+gameStatus.style.fontFamily = 'Arial, sans-serif';
+gameStatus.style.fontSize = '18px';
+gameStatus.style.zIndex = '100';
+gameStatus.textContent = 'Waiting for players to join...';
+document.body.appendChild(gameStatus);
+
+// Update UI functions
+function updateGameInfo() {
+  let html = `<h2>Game Room: ${roomId}</h2>`;
+  html += `<p>Round: ${gameState.round}</p>`;
+  
+  if (activePlayer) {
+    html += `<p>Current Turn: ${activePlayer.name}</p>`;
+  } else {
+    html += `<p>Waiting to start...</p>`;
+  }
+  
+  gameInfo.innerHTML = html;
+}
+
+function updatePlayerList() {
+  let html = '<h2>Players</h2>';
+  
+  players.forEach(player => {
+    // Count remaining cups
+    const remainingCups = playerCupStates[player.id] ? 
+      playerCupStates[player.id].filter(cup => cup).length : 6;
+    
+    const isActive = activePlayer && player.id === activePlayer.id;
+    const activeClass = isActive ? 'style="color: #4CAF50; font-weight: bold;"' : '';
+    
+    html += `<div ${activeClass}>
+      ${player.name}: ${remainingCups} cups left
+      ${!player.connected ? ' (Disconnected)' : ''}
+    </div>`;
+  });
+  
+  playerList.innerHTML = html;
+}
 
 // Ball reset function
 function resetBall() {
-    ballInFlight = false;
-    ballBody.position.set(0, 1, -3); // Reset position
-    ballBody.velocity.set(0, 0, 0);  // Stop movement
-    ballBody.angularVelocity.set(0, 0, 0); // Stop rotation
-    throwFeedback.textContent = 'Ready for next throw';
+  ballInFlight = false;
+  ballBody.position.set(0, 1, -3); // Reset position
+  ballBody.velocity.set(0, 0, 0);  // Stop movement
+  ballBody.angularVelocity.set(0, 0, 0); // Stop rotation
 }
 
 // Check if ball needs to be reset
 function checkBallReset() {
-    const pos = ballBody.position;
-    const vel = ballBody.velocity;
-    const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+  const pos = ballBody.position;
+  const vel = ballBody.velocity;
+  const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+  
+  // Reset if out of bounds or if it's been moving too long with low speed
+  if (pos.y < -2 || pos.x < -10 || pos.x > 10 || pos.z < -10 || pos.z > 10 || 
+      (Date.now() - lastThrowTime > resetDelay && speed < 0.3 && ballInFlight)) {
+    resetBall();
     
-    // Reset if out of bounds or if it's been moving too long with low speed
-    if (pos.y < -2 || pos.x < -10 || pos.x > 10 || pos.z < -10 || pos.z > 10 || 
-        (Date.now() - lastThrowTime > resetDelay && speed < 0.3 && ballInFlight)) {
-        resetBall();
+    // Notify server that the throw missed
+    if (isHost && activePlayer) {
+      socket.emit('cupMiss', { roomId });
+      gameStatus.textContent = `${activePlayer.name}'s throw missed!`;
     }
+  }
+}
+
+// Clear all cups from the scene
+function clearCups() {
+  currentCups.forEach(cup => {
+    scene.remove(cup.mesh);
+    world.removeBody(cup.body);
+  });
+  currentCups = [];
+}
+
+// Load cups for specific player
+function loadPlayerCups(playerId) {
+  // Clear existing cups
+  clearCups();
+  
+  // Get the cup state for this player or create new one
+  const cupState = playerCupStates[playerId] || Array(6).fill(true);
+  
+  // Create new cups
+  currentCups = createCups();
+  
+  // Apply the cup state (hide cups that are already hit)
+  currentCups.forEach((cup, index) => {
+    if (!cupState[index]) {
+      scene.remove(cup.mesh);
+      cup.active = false;
+    }
+  });
 }
 
 // Collision detection for cups
 ballBody.addEventListener('collide', (event) => {
-    const otherBody = event.body;
+  if (!gameStarted || !ballInFlight || !isHost) return;
+  
+  const otherBody = event.body;
+  
+  // Find if we hit a cup
+  const hitCupIndex = currentCups.findIndex(cup => cup.body === otherBody && cup.active);
+  
+  if (hitCupIndex >= 0) {
+    const hitCup = currentCups[hitCupIndex];
     
-    // Find if we hit a cup
-    const hitCupIndex = cups.findIndex(cup => cup.body === otherBody && cup.active);
-    
-    if (hitCupIndex >= 0) {
-        const hitCup = cups[hitCupIndex];
-        
-        // Check if the ball is above the cup's midpoint (successful throw)
-        if (ballBody.position.y > hitCup.body.position.y + (cupHeight * 0.3)) {
-            // Hide the cup
-            scene.remove(hitCup.mesh);
-            hitCup.active = false;
-            
-            // Increment score
-            score += 1;
-            scoreDisplay.innerHTML = `Score: ${score}`;
-            
-            // Visual feedback
-            throwFeedback.textContent = '🎉 Cup hit! +1 point';
-            throwFeedback.style.color = '#00ff00';
-            
-            // Reset ball after a delay
-            setTimeout(resetBall, 1500);
+    // Check if the ball is above the cup's midpoint (successful throw)
+    if (ballBody.position.y > hitCup.body.position.y + 0.15) {
+      // Hide the cup
+      scene.remove(hitCup.mesh);
+      hitCup.active = false;
+      
+      // Update the player's cup state
+      if (activePlayer) {
+        const playerCups = playerCupStates[activePlayer.id];
+        if (playerCups) {
+          playerCups[hitCup.index] = false;
+          
+          // Notify server about the hit
+          socket.emit('cupHit', {
+            roomId,
+            cupIndex: hitCup.index,
+            playerId: activePlayer.id
+          });
+          
+          gameStatus.textContent = `${activePlayer.name} hit a cup!`;
+          
+          // Reset ball
+          resetBall();
         }
+      }
     }
+  }
 });
 
-// Handle throw event from controller
-socket.on('throw', (throwData) => {
-    const velocityData = throwData.velocity || throwData; // Backward compatibility
+// Start button click handler
+startButton.addEventListener('click', () => {
+  if (isHost && players.length > 0) {
+    socket.emit('startGame', roomId);
+    startButton.style.display = 'none';
+    qrContainer.style.display = 'none';
+  }
+});
+
+// Socket.io event handlers
+socket.on('connect', () => {
+  if (isHost || isSpectator) {
+    // Join the room without being a controller
+    socket.emit('joinRoom', {
+      roomId: roomId,
+      isController: false
+    });
+  }
+});
+
+socket.on('joinResponse', (data) => {
+  if (data.success) {
+    if (isHost) {
+      // Generate QR code for joining
+      const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
+      
+      if (typeof QRCode !== 'undefined') {
+        new QRCode(document.getElementById('qrcode'), {
+          text: joinUrl,
+          width: 200,
+          height: 200,
+          colorDark: "#000000",
+          colorLight: "#ffffff",
+          correctLevel: QRCode.CorrectLevel.H
+        });
+        
+        qrInfo.textContent = `Room ID: ${roomId}`;
+      } else {
+        qrCode.textContent = 'QR code library not loaded. Use this link:';
+        const link = document.createElement('a');
+        link.href = joinUrl;
+        link.textContent = joinUrl;
+        link.target = '_blank';
+        qrCode.appendChild(document.createElement('br'));
+        qrCode.appendChild(link);
+      }
+    }
+  } else {
+    alert(`Failed to join game: ${data.message}`);
+    window.location.href = '/';
+  }
+});
+
+socket.on('roomUpdate', (roomData) => {
+  players = roomData.players;
+  updatePlayerList();
+  updateGameInfo();
+  
+  if (isHost) {
+    startButton.disabled = players.length === 0;
+  }
+});
+
+socket.on('gameStarted', (data) => {
+  gameStarted = true;
+  activePlayer = players.find(p => p.id === data.firstPlayer);
+  
+  // Hide UI elements
+  if (isHost) {
+    startButton.style.display = 'none';
+    qrContainer.style.display = 'none';
+  }
+  
+  // Initialize all player cup states if not already done
+  players.forEach(player => {
+    if (!playerCupStates[player.id]) {
+      playerCupStates[player.id] = Array(6).fill(true);
+    }
+  });
+  
+  // Load the cups for the first player
+  if (activePlayer) {
+    loadPlayerCups(activePlayer.id);
+    gameStatus.textContent = `Game started! ${activePlayer.name}'s turn`;
+  }
+  
+  updateGameInfo();
+  updatePlayerList();
+});
+
+socket.on('throw', (data) => {
+  if (gameStarted && !ballInFlight) {
+    // Extract velocity data
+    const velocityData = data.velocity;
     
-    // Calculate a ball launch position that feels natural
+    // Reset ball position for throw
     ballBody.position.set(0, 1, -3);
     
     // Apply the velocity
     ballBody.velocity.set(
-        velocityData.x,
-        velocityData.y,
-        velocityData.z
+      velocityData.x,
+      velocityData.y,
+      velocityData.z
     );
     
     // Apply a small random rotation to make it more realistic
     ballBody.angularVelocity.set(
-        (Math.random() - 0.5) * 5,
-        (Math.random() - 0.5) * 5,
-        (Math.random() - 0.5) * 5
+      (Math.random() - 0.5) * 5,
+      (Math.random() - 0.5) * 5,
+      (Math.random() - 0.5) * 5
     );
     
     // Update game state
     ballInFlight = true;
     lastThrowTime = Date.now();
-    throwsAttempted++;
     
-    // Add visual feedback
-    if (throwData.power) {
-        const powerPercent = Math.round(throwData.power * 100 / 1.5);
-        throwFeedback.textContent = `Throw power: ${powerPercent}%`;
-        throwFeedback.style.color = 'white';
-    } else {
-        throwFeedback.textContent = 'Ball thrown';
-        throwFeedback.style.color = 'white';
+    // Update status
+    gameStatus.textContent = `${activePlayer ? activePlayer.name : 'Player'} is throwing...`;
+  }
+});
+
+socket.on('turnChange', (data) => {
+  activePlayer = data.activePlayer;
+  
+  // Update game status
+  gameStatus.textContent = `${activePlayer.name}'s turn`;
+  
+  // Load the cups for the current player
+  loadPlayerCups(activePlayer.id);
+  
+  // Update UI
+  updateGameInfo();
+  updatePlayerList();
+  
+  // Make sure ball is reset
+  resetBall();
+});
+
+socket.on('playerWon', (data) => {
+  const winner = data.player;
+  gameStatus.textContent = `🏆 ${winner.name} won the game! 🏆`;
+  gameStarted = false;
+  
+  // Display final scores after a delay
+  setTimeout(() => {
+    let scoreText = 'Final Scores:\n';
+    for (const [playerId, score] of Object.entries(data.scores)) {
+      const player = players.find(p => p.id === playerId);
+      if (player) {
+        scoreText += `${player.name}: ${score} points\n`;
+      }
     }
+    alert(scoreText);
+  }, 2000);
+});
+
+socket.on('playerDisconnected', (data) => {
+  // Update the active player if needed
+  if (data.activePlayer) {
+    activePlayer = data.activePlayer;
     
-    console.log('Applied velocity:', ballBody.velocity);
+    // Load the cups for the current player
+    loadPlayerCups(activePlayer.id);
+    
+    // Update status
+    gameStatus.textContent = `Player disconnected. ${activePlayer.name}'s turn`;
+  }
+  
+  updatePlayerList();
+});
+
+socket.on('roomClosed', () => {
+  alert('The game room has been closed.');
+  window.location.href = '/';
 });
 
 // Animation loop
 function animate() {
-    requestAnimationFrame(animate);
-    
-    // Physics step
-    world.step(1 / 60); 
-    
-    // Sync ball mesh with physics body
-    ballMesh.position.copy(ballBody.position);
-    ballMesh.quaternion.copy(ballBody.quaternion);
-    
-    // Check if ball needs reset
-    if (ballInFlight) {
-        checkBallReset();
-    }
-    
-    renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+  
+  // Physics step
+  world.step(1 / 60); 
+  
+  // Sync ball mesh with physics body
+  ballMesh.position.copy(ballBody.position);
+  ballMesh.quaternion.copy(ballBody.quaternion);
+  
+  // Check if ball needs reset
+  if (ballInFlight && gameStarted) {
+    checkBallReset();
+  }
+  
+  renderer.render(scene, camera);
 }
 
 animate();
 
 // Handle window resize
 window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
 });
