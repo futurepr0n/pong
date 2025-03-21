@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Controller</title>
+  <style>
+    body {
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      background-color: #f0f0f0;
+    }
+    #throwButton {
+      width: 80%;
+      height: 20%;
+      font-size: 24px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    #statusDisplay {
+      font-size: 18px;
+      color: #333;
+      margin: 10px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <button id="throwButton">Hold to Throw</button>
+  <div id="statusDisplay">Connected to server. Hold to throw.</div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
+  <script src="controller.js"></script>
+</body>
+</html>
