@@ -3,8 +3,8 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 
-// Serve static files from the current directory
-app.use(express.static('.'));
+// Serve static files from the public directory
+app.use(express.static('public'));
 
 // Game rooms storage
 const gameRooms = new Map();
@@ -332,7 +332,8 @@ function advanceToNextPlayer(room) {
 }
 
 // Start the server
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 http.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  console.log('Open a browser and navigate to http://localhost:${PORT}');
 });
