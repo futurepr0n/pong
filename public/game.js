@@ -331,17 +331,18 @@ function updatePlayerList() {
 function updatePlayerListInModal() {
   playerListContainer.innerHTML = '';
   
-  if (players.length === 0) {
+  // Filter to show only connected non-host players
+  const connectedPlayers = players.filter(p => p.connected && !p.isHost);
+  
+  if (connectedPlayers.length === 0) {
     playerListContainer.innerHTML = '<p>No players connected</p>';
   } else {
     const list = document.createElement('ol');
     
-    players.forEach(player => {
-      if (player.connected && !player.isHost) {
-        const item = document.createElement('li');
-        item.textContent = player.name;
-        list.appendChild(item);
-      }
+    connectedPlayers.forEach(player => {
+      const item = document.createElement('li');
+      item.textContent = player.name;
+      list.appendChild(item);
     });
     
     playerListContainer.appendChild(list);
@@ -422,8 +423,8 @@ function showQRCode() {
     qrRoomID.textContent = roomId;
     
     // Generate QR code with the room ID
-    // First, determine the correct base URL for the game
-    const baseUrl = 'https://pong.futurepr0n.com'; // Use your actual domain here
+    // Use the exact format for your domain
+    const baseUrl = 'https://pong.futurepr0n.com';
     
     // Create the full URL for joining
     const joinUrl = `${baseUrl}/controller.html?room=${roomId}`;
@@ -630,7 +631,7 @@ socket.on('joinResponse', (data) => {
 });
 
 socket.on('roomUpdate', (data) => {
-  log('Room update:', data);
+  log('Room update received:', data);
   
   players = data.players;
   
@@ -639,13 +640,17 @@ socket.on('roomUpdate', (data) => {
   updateGameInfo();
   
   // Update player count in QR modal
-  if (isHost) {
+  if (isHost && qrModal.style.display === 'flex') {
+    // Count actual connected controllers (not hosts or disconnected)
     const connectedPlayers = players.filter(p => p.connected && !p.isHost).length;
     playerCount.textContent = connectedPlayers;
-    updatePlayerListInModal();
     
-    // Enable/disable start button based on player count
+    log(`Updating player count display to: ${connectedPlayers}`);
+    
+    // Enable start button if we have at least one connected player
     startGameBtn.disabled = connectedPlayers === 0 || gameStarted;
+    
+    updatePlayerListInModal();
   }
 });
 

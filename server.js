@@ -3,7 +3,6 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 const path = require('path');
-const fs = require('fs');
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
@@ -11,7 +10,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Configuration
 const CONFIG = {
   // The base URL for generating QR codes and links
-  // Change this to your actual domain name
   BASE_URL: process.env.BASE_URL || 'https://pong.futurepr0n.com',
   
   // How long rooms stay active without a host (in milliseconds)
@@ -54,7 +52,7 @@ function getActiveRooms() {
       continue;
     }
     
-    // Count connected players
+    // Count connected players that are not hosts
     const connectedPlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
     
     rooms.push({
@@ -109,12 +107,21 @@ function broadcastRoomUpdate(roomId) {
     isHost: p.isHost
   }));
   
+  // Get just the connected non-host players for the count
+  const connectedPlayerCount = playersList.filter(p => p.connected && !p.isHost).length;
+  
+  logDebug(`Broadcasting room update for ${roomId}, ${connectedPlayerCount} connected players`);
+  
   // Send update to all clients in the room
   io.to(roomId).emit('roomUpdate', {
     roomId: roomId,
     players: playersList,
+    playerCount: connectedPlayerCount,
     status: room.status
   });
+  
+  // Also update the room list for all clients in the lobby
+  io.emit('roomList', getActiveRooms());
 }
 
 // Express routes
@@ -327,6 +334,11 @@ io.on('connection', (socket) => {
       
       // Broadcast room update
       broadcastRoomUpdate(roomId);
+      
+      // Log the current players in the room for debugging
+      const connectedPlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
+      logDebug(`Room ${roomId} now has ${connectedPlayers.length} connected players (excluding host)`);
+      
       return;
     }
     
@@ -357,6 +369,8 @@ io.on('connection', (socket) => {
     
     // Get active players
     const activePlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
+    
+    logDebug(`Room ${roomId} has ${activePlayers.length} active players ready to start`);
     
     if (activePlayers.length === 0) {
       socket.emit('error', 'Need at least one player to start');

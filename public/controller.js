@@ -2,11 +2,25 @@
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 
+// Debug mode
+const DEBUG = true;
+function log(message, obj = null) {
+  if (DEBUG) {
+    if (obj) {
+      console.log(`[CONTROLLER] ${message}`, obj);
+    } else {
+      console.log(`[CONTROLLER] ${message}`);
+    }
+  }
+}
+
 // Validate room parameter
 if (!roomId) {
   alert('No room ID provided. Please use the QR code to join a game.');
   window.location.href = '/';
 }
+
+log(`Initializing controller for room: ${roomId}`);
 
 // DOM Elements
 const nameForm = document.getElementById('nameForm');
@@ -43,8 +57,14 @@ let orientationHistory = [];
 let lastOrientationTime = 0;
 let velocityReadings = [];
 
-// Connect to Socket.io server
-const socket = io();
+// Connect to Socket.io server with reconnection options
+const socket = io({
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  timeout: 20000
+});
 
 // Show a connection status indicator
 const connectionIndicator = document.createElement('div');
@@ -264,9 +284,9 @@ function endThrow(e) {
   const gammaDiff = currentOrientation.gamma - initialOrientation.gamma;
   const totalChange = Math.abs(betaDiff) + Math.abs(gammaDiff);
   
-  console.log('Beta difference:', betaDiff);
-  console.log('Gamma difference:', gammaDiff);
-  console.log('Throw duration:', throwDuration);
+  log('Beta difference:', betaDiff);
+  log('Gamma difference:', gammaDiff);
+  log('Throw duration:', throwDuration);
   
   // Direct conversion of orientation change to velocity
   // X velocity is based on gamma change (left/right tilt)
@@ -346,11 +366,15 @@ function submitName() {
     nameSubmit.disabled = true;
     nameSubmit.textContent = 'Joining...';
     
+    log(`Joining room ${roomId} as controller with name: ${playerName}`);
+    
     // Join the room as a controller
     socket.emit('joinRoom', {
       roomId: roomId,
       name: playerName,
-      isController: true
+      isController: true,  // Explicitly mark as controller
+      isHost: false,
+      isSpectator: false
     });
     
     // Add timeout to prevent UI from getting stuck
@@ -367,12 +391,33 @@ function submitName() {
 
 // Socket.io event handlers
 socket.on('connect', () => {
-  console.log('Connected to server');
+  log('Connected to server');
   connectionIndicator.style.backgroundColor = '#4CAF50'; // Green when connected
 });
 
+socket.on('connect_error', (error) => {
+  log('Connection error:', error);
+  connectionIndicator.style.backgroundColor = '#f44336'; // Red on connection error
+});
+
+socket.on('reconnect', (attemptNumber) => {
+  log(`Reconnected after ${attemptNumber} attempts`);
+  connectionIndicator.style.backgroundColor = '#4CAF50'; // Green when reconnected
+  
+  // If we were already joined, re-join the room
+  if (playerInfo) {
+    socket.emit('joinRoom', {
+      roomId: roomId,
+      name: playerInfo.name,
+      isController: true,
+      isHost: false,
+      isSpectator: false
+    });
+  }
+});
+
 socket.on('disconnect', () => {
-  console.log('Disconnected from server');
+  log('Disconnected from server');
   connectionIndicator.style.backgroundColor = '#f44336'; // Red when disconnected
   
   // Show waiting overlay
@@ -401,6 +446,8 @@ socket.on('joinResponse', (data) => {
   joiningInProgress = false;
   
   if (data.success) {
+    log('Successfully joined room as controller:', data);
+    
     // Hide the name form and show game controls
     nameForm.style.display = 'none';
     gameControls.style.display = 'flex';
