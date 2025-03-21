@@ -45,9 +45,24 @@ function generateRoomId() {
 }
 
 // Clean up empty rooms
+// Clean up empty rooms
 function cleanupEmptyRooms() {
-  const transaction = db.transaction(() => {
-    // Remove rooms with no connected players
+  try {
+    // First, remove players from rooms with no connected players
+    db.prepare(`
+      DELETE FROM room_players 
+      WHERE room_id IN (
+        SELECT room_id 
+        FROM rooms 
+        WHERE room_id NOT IN (
+          SELECT DISTINCT room_id 
+          FROM room_players 
+          WHERE is_connected = 1
+        ) AND status = 'waiting'
+      )
+    `).run();
+
+    // Then remove the empty rooms
     const cleanupStmt = db.prepare(`
       DELETE FROM rooms 
       WHERE room_id NOT IN (
@@ -56,16 +71,55 @@ function cleanupEmptyRooms() {
         WHERE is_connected = 1
       ) AND status = 'waiting'
     `);
-    cleanupStmt.run();
-  });
-  
-  try {
-    transaction();
-    console.log('Cleaned up empty rooms');
+    
+    const result = cleanupStmt.run();
+    console.log(`Cleaned up ${result.changes} empty rooms`);
   } catch (error) {
     console.error('Room cleanup error:', error);
   }
 }
+
+// Modify the disconnection handler to use this new cleanup method
+socket.on('disconnect', () => {
+  if (socket.currentRoom) {
+    try {
+      // Mark player as disconnected
+      db.prepare(`
+        UPDATE room_players 
+        SET is_connected = 0 
+        WHERE room_id = ? AND player_id = ?
+      `).run(socket.currentRoom, socket.id);
+      
+      // Check if room is now empty
+      const remainingPlayers = db.prepare(`
+        SELECT COUNT(*) as count 
+        FROM room_players 
+        WHERE room_id = ? AND is_connected = 1
+      `).get(socket.currentRoom).count;
+      
+      // Cleanup empty rooms
+      cleanupEmptyRooms();
+      
+      // Update room list for lobby
+      const remainingRooms = db.prepare(`
+        SELECT r.room_id, r.status, 
+               COUNT(rp.player_id) as player_count
+        FROM rooms r
+        LEFT JOIN room_players rp ON r.room_id = rp.room_id AND rp.is_connected = 1
+        WHERE r.status = 'waiting'
+        GROUP BY r.room_id
+      `).all().map(room => ({
+        id: room.room_id,
+        status: room.status,
+        players: Array(room.player_count).fill({})
+      }));
+      
+      io.emit('roomList', remainingRooms);
+    } catch (error) {
+      console.error('Disconnection handling error:', error);
+    }
+  }
+});
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
