@@ -1,15 +1,15 @@
-// Get room ID and host status from URL parameters
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 const isHost = urlParams.get('host') === 'true';
 const isSpectator = urlParams.get('spectator') === 'true';
-
-const hostToken = isHost ? localStorage.getItem('hostToken') : null;
+const hostToken = urlParams.get('token') || localStorage.getItem(`hostToken_${roomId}`);
 
 if (!roomId) {
   alert('No room ID provided.');
   window.location.href = '/';
 }
+
+
 
 // Scene setup
 const scene = new THREE.Scene();
@@ -524,12 +524,12 @@ ballBody.addEventListener('collide', (event) => {
     console.log('Connected to server');
     
     if (isHost || isSpectator) {
-      // Join the room 
+      // Join the room with host token if available
       socket.emit('joinRoom', {
         roomId: roomId,
         isHost: isHost,
         isController: false,
-        hostToken: hostToken  // Send the host token for verification
+        hostToken: hostToken
       });
     }
   });

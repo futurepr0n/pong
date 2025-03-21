@@ -58,35 +58,37 @@ io.on('connection', (socket) => {
   socket.on('createRoom', (data) => {
     const roomId = generateRoomId();
     const joinUrl = `${BASE_URL}/controller.html?room=${roomId}`;
-    const hostToken = (data && data.hostToken) || null;
+    const hostToken = (data && data.hostToken) || Math.random().toString(36).substring(2, 15);
     
     gameRooms.set(roomId, {
       id: roomId,
       host: socket.id,
-      hostToken: hostToken, // Store the host token with the room
+      hostToken: hostToken, 
       players: [],
       spectators: [],
       status: 'waiting',
       activePlayerIndex: 0,
       gameState: {
-        cups: {},  // Map of playerID to cup states
+        cups: {},  
         scores: {},
         round: 1
       },
-      created: Date.now() // Add timestamp for room cleanup
+      created: Date.now(),
+      // Add explicit connection tracking
+      hostConnected: true,
+      lastPing: Date.now()
     });
     
-    // Map the host token to room ID for easier lookup
-    if (hostToken) {
-      hostTokens.set(hostToken, roomId);
-    }
+    // Ensure host token is mapped correctly
+    hostTokens.set(hostToken, roomId);
     
     socket.join(roomId);
-    socket.currentRoom = roomId; // Store room ID on socket for disconnect handling
+    socket.currentRoom = roomId; 
     
     socket.emit('roomCreated', {
       roomId: roomId, 
       joinUrl: joinUrl,
+      hostToken: hostToken,
       players: []
     });
     
@@ -95,7 +97,123 @@ io.on('connection', (socket) => {
       .filter(room => room.status === 'waiting')
       .map(r => getRoomData(r)));
     
-    console.log(`Room created: ${roomId} by ${socket.id} ${hostToken ? '(with host token)' : ''}`);
+    console.log(`Room created: ${roomId} by ${socket.id} with host token: ${hostToken}`);
+  });
+  
+  // Enhance the joinRoom handler to be more robust
+  socket.on('joinRoom', (data) => {
+    const { roomId, name, isController, isHost, hostToken } = data;
+    let room = gameRooms.get(roomId);
+    
+    // Try to find room by host token if direct roomId lookup fails
+    if (!room && hostToken) {
+      const tokenRoomId = hostTokens.get(hostToken);
+      if (tokenRoomId) {
+        room = gameRooms.get(tokenRoomId);
+        console.log(`Found room ${tokenRoomId} using host token`);
+      }
+    }
+    
+    if (!room) {
+      console.error(`Room not found: ${roomId}, Host Token: ${hostToken}`);
+      socket.emit('joinResponse', { 
+        success: false, 
+        message: 'Room not found. It may have expired or been closed.',
+        roomId: roomId 
+      });
+      return;
+    }
+    
+    // Additional logging for debugging
+    console.log(`Attempting to join room: ${roomId}, Host: ${room.host}, Current Status: ${room.status}`);
+    
+    socket.join(roomId);
+    socket.currentRoom = roomId;
+    
+    if (isHost) {
+      // Verify or update host
+      if (!room.host || room.host !== socket.id) {
+        room.host = socket.id;
+        room.hostConnected = true;
+        room.hostToken = hostToken || room.hostToken;
+        
+        // Ensure host token is mapped correctly
+        if (hostToken) {
+          hostTokens.set(hostToken, roomId);
+        }
+        
+        console.log(`Host verified/updated for room ${roomId}`);
+      }
+      
+      socket.emit('joinResponse', {
+        success: true,
+        roomId: roomId,
+        isHost: true,
+        joinUrl: `${BASE_URL}/controller.html?room=${roomId}`,
+        hostToken: room.hostToken
+      });
+      
+      // Show QR code immediately
+      socket.emit('showQRCode', {
+        roomId: roomId,
+        joinUrl: `${BASE_URL}/controller.html?room=${roomId}`
+      });
+    } else if (isController) {
+      // Player joining logic remains mostly the same
+      const existingPlayerIndex = room.players.findIndex(p => p.id === socket.id);
+      let playerInfo;
+      
+      if (existingPlayerIndex >= 0) {
+        playerInfo = room.players[existingPlayerIndex];
+        playerInfo.connected = true;
+        if (name && name !== playerInfo.name) {
+          playerInfo.name = name;
+        }
+      } else {
+        playerInfo = {
+          id: socket.id,
+          name: name || `Player ${room.players.length + 1}`,
+          connected: true
+        };
+        room.players.push(playerInfo);
+        
+        // Initialize player's cup state and score
+        room.gameState.cups[socket.id] = Array(6).fill(true);
+        room.gameState.scores[socket.id] = 0;
+      }
+      
+      socket.emit('joinResponse', { 
+        success: true, 
+        roomId: roomId,
+        playerInfo: playerInfo,
+        isController: true,
+        gameState: room.status === 'playing' ? room.gameState : null
+      });
+    } else {
+      // Spectator logic
+      if (!room.spectators.includes(socket.id)) {
+        room.spectators.push(socket.id);
+      }
+      
+      socket.emit('joinResponse', {
+        success: true,
+        roomId: roomId,
+        isHost: false,
+        isSpectator: true,
+        gameState: room.gameState
+      });
+    }
+    
+    // Update room for all clients
+    io.to(roomId).emit('roomUpdate', {
+      ...getRoomData(room),
+      activePlayer: room.status === 'playing' ? room.players[room.activePlayerIndex] : null
+    });
+    
+    // Update room list for lobby
+    io.emit('roomList', Array.from(gameRooms.values())
+      .filter(room => room.status === 'waiting')
+      .map(r => getRoomData(r)));
   });
   
   // Handle getting room list
