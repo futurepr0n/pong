@@ -25,8 +25,14 @@ if (!roomId) {
 
 log(`Initializing game for room: ${roomId}, host: ${isHost}, spectator: ${isSpectator}`);
 
-// Socket.io connection
-const socket = io();
+// Socket.io connection with reconnection options
+const socket = io({
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  timeout: 20000
+});
 
 // Room and game state
 let gameStarted = false;
@@ -416,9 +422,11 @@ function showQRCode() {
     qrRoomID.textContent = roomId;
     
     // Generate QR code with the room ID
-    // Make sure URL includes the full path including origin
-    const origin = window.location.origin;
-    const joinUrl = `${origin}/controller.html?room=${roomId}`;
+    // First, determine the correct base URL for the game
+    const baseUrl = 'https://pong.futurepr0n.com'; // Use your actual domain here
+    
+    // Create the full URL for joining
+    const joinUrl = `${baseUrl}/controller.html?room=${roomId}`;
     
     log(`Generating QR code for URL: ${joinUrl}`);
     
@@ -572,6 +580,26 @@ socket.on('connect', () => {
     isSpectator: isSpectator,
     hostToken: hostToken
   });
+});
+
+socket.on('connect_error', (error) => {
+  log('Connection error:', error);
+  connectionStatus.style.backgroundColor = '#f44336'; // Red on connection error
+});
+
+socket.on('reconnect', (attemptNumber) => {
+  log(`Reconnected after ${attemptNumber} attempts`);
+  connectionStatus.style.backgroundColor = '#4CAF50'; // Green when reconnected
+  
+  // Re-join room on reconnection
+  if (roomId) {
+    socket.emit('joinRoom', {
+      roomId: roomId,
+      isHost: isHost,
+      isSpectator: isSpectator,
+      hostToken: hostToken
+    });
+  }
 });
 
 socket.on('joinResponse', (data) => {

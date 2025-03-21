@@ -1,5 +1,23 @@
-// Connect to Socket.io server
-const socket = io();
+// Connect to Socket.io server with reconnection options
+const socket = io({
+  reconnection: true,
+  reconnectionAttempts: 5,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 3000,
+  timeout: 10000
+});
+
+// Debug mode
+const DEBUG = true;
+function log(message, obj = null) {
+  if (DEBUG) {
+    if (obj) {
+      console.log(`[LOBBY] ${message}`, obj);
+    } else {
+      console.log(`[LOBBY] ${message}`);
+    }
+  }
+}
 
 // DOM Elements
 const createRoomBtn = document.getElementById('createRoomBtn');
@@ -8,6 +26,18 @@ const loadingElement = document.getElementById('loading');
 
 // Room Creation State
 let isCreatingRoom = false;
+let creationTimeout = null;
+
+// Connection status indicator
+const connectionStatus = document.createElement('div');
+connectionStatus.style.position = 'absolute';
+connectionStatus.style.top = '10px';
+connectionStatus.style.right = '10px';
+connectionStatus.style.width = '10px';
+connectionStatus.style.height = '10px';
+connectionStatus.style.borderRadius = '50%';
+connectionStatus.style.backgroundColor = '#ccc';
+document.body.appendChild(connectionStatus);
 
 // Create Room Button Click
 createRoomBtn.addEventListener('click', () => {
@@ -23,50 +53,68 @@ createRoomBtn.addEventListener('click', () => {
   const hostToken = Math.random().toString(36).substring(2, 15) + 
                    Math.random().toString(36).substring(2, 15);
   
+  log('Creating room with token:', hostToken);
+  
   // Emit create room event
   socket.emit('createRoom', { hostToken });
   
   // Add timeout to prevent UI from getting stuck
-  setTimeout(() => {
+  creationTimeout = setTimeout(() => {
     if (isCreatingRoom) {
       isCreatingRoom = false;
       createRoomBtn.disabled = false;
       loadingElement.style.display = 'none';
       alert('Room creation timed out. Please try again.');
     }
-  }, 5000);
+  }, 10000);
 });
 
 // Handle Room Creation Response
 socket.on('roomCreated', (data) => {
+  log('Room created:', data);
+  
+  // Clear timeout
+  if (creationTimeout) {
+    clearTimeout(creationTimeout);
+    creationTimeout = null;
+  }
+  
   isCreatingRoom = false;
   
-  console.log('Room created:', data);
+  // Before redirecting, store the token in localStorage to help with reconnection
+  try {
+    localStorage.setItem(`host_token_${data.roomId}`, data.hostToken);
+  } catch (e) {
+    // Ignore localStorage errors
+    console.error('Failed to store host token:', e);
+  }
   
   // Redirect to the game page with the room ID and host token
   window.location.href = `/game.html?room=${data.roomId}&host=true&token=${data.hostToken}`;
 });
 
-// Enhanced error handling for room joining
+// Handle room join failure
 socket.on('joinResponse', (data) => {
   if (!data.success) {
     // More informative error handling
-    console.error('Room join failed:', data.message);
+    log('Room join failed:', data.message);
     alert(data.message || 'Failed to join the game room. Please try again.');
     
-    // Return to lobby
-    if (window.location.pathname !== '/') {
-      window.location.href = '/';
-    }
+    // Reset UI
+    isCreatingRoom = false;
+    createRoomBtn.disabled = false;
+    loadingElement.style.display = 'none';
   }
 });
 
 // Handle room list updates
 socket.on('roomList', (rooms) => {
   if (!rooms || !Array.isArray(rooms)) {
-    console.error('Invalid room list data received');
+    log('Invalid room list data received');
     return;
   }
+  
+  log('Received room list:', rooms);
   
   // Update the UI with rooms
   if (rooms.length > 0) {
@@ -97,7 +145,7 @@ socket.on('roomList', (rooms) => {
 
 // Error handling
 socket.on('error', (errorMessage) => {
-  console.error('Socket error:', errorMessage);
+  log('Socket error:', errorMessage);
   alert(`Error: ${errorMessage}`);
   
   // Reset UI
@@ -107,22 +155,9 @@ socket.on('error', (errorMessage) => {
 });
 
 // Connection management
-socket.on('disconnect', () => {
-  console.warn('Disconnected from server');
-  
-  // Reset UI
-  isCreatingRoom = false;
-  createRoomBtn.disabled = false;
-  loadingElement.style.display = 'none';
-  
-  // Show alert but only if still on lobby page
-  if (document.readyState === 'complete' && window.location.pathname === '/') {
-    alert('Connection lost. Please check your internet and try again.');
-  }
-});
-
 socket.on('connect', () => {
-  console.log('Connected to server');
+  log('Connected to server');
+  connectionStatus.style.backgroundColor = '#4CAF50'; // Green when connected
   
   // Reset UI
   isCreatingRoom = false;
@@ -133,7 +168,34 @@ socket.on('connect', () => {
   socket.emit('getRoomList');
 });
 
+socket.on('disconnect', () => {
+  log('Disconnected from server');
+  connectionStatus.style.backgroundColor = '#f44336'; // Red when disconnected
+  
+  // Reset UI if needed
+  if (isCreatingRoom) {
+    isCreatingRoom = false;
+    createRoomBtn.disabled = false;
+    loadingElement.style.display = 'none';
+    alert('Connection lost during room creation. Please try again when reconnected.');
+  }
+});
+
+socket.on('connect_error', (error) => {
+  log('Connection error:', error);
+  connectionStatus.style.backgroundColor = '#ff9800'; // Orange on connection error
+});
+
+socket.on('reconnect', (attemptNumber) => {
+  log(`Reconnected after ${attemptNumber} attempts`);
+  connectionStatus.style.backgroundColor = '#4CAF50'; // Green when reconnected
+  
+  // Request room list after reconnect
+  socket.emit('getRoomList');
+});
+
 // Request room list when page loads
 window.addEventListener('load', () => {
+  log('Page loaded, requesting room list');
   socket.emit('getRoomList');
 });

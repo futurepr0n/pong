@@ -3,18 +3,33 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
 const path = require('path');
+const fs = require('fs');
 
 // Serve static files from the public directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-// In-memory storage for game rooms
+// Configuration
+const CONFIG = {
+  // The base URL for generating QR codes and links
+  // Change this to your actual domain name
+  BASE_URL: process.env.BASE_URL || 'https://pong.futurepr0n.com',
+  
+  // How long rooms stay active without a host (in milliseconds)
+  ROOM_GRACE_PERIOD: 5 * 60 * 1000, // 5 minutes
+  
+  // How often to check for expired rooms (in milliseconds)
+  CLEANUP_INTERVAL: 60 * 1000, // 1 minute
+  
+  // Debug mode for verbose logging
+  DEBUG: true
+};
+
+// Storage for game rooms (will persist across socket connections)
 const gameRooms = new Map();
 
-// Debug mode
-const DEBUG = true;
-
+// Debug logging
 function logDebug(message, obj = null) {
-  if (DEBUG) {
+  if (CONFIG.DEBUG) {
     if (obj) {
       console.log(`[DEBUG] ${message}`, obj);
     } else {
@@ -25,41 +40,95 @@ function logDebug(message, obj = null) {
 
 // Generate unique room ID
 function generateRoomId() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
+  return Math.random().toString(36).substring(2, 7).toUpperCase();
 }
 
-// Helper function to get all active rooms
+// Get list of active rooms for the lobby
 function getActiveRooms() {
   const rooms = [];
+  const now = Date.now();
+  
   for (const [roomId, room] of gameRooms.entries()) {
-    const connectedPlayers = Object.values(room.players).filter(p => p.connected);
+    // Skip rooms that are expired or in grace period
+    if (room.status === 'closed' || (room.hostDisconnectedAt && now - room.hostDisconnectedAt > CONFIG.ROOM_GRACE_PERIOD)) {
+      continue;
+    }
+    
+    // Count connected players
+    const connectedPlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
+    
     rooms.push({
       id: roomId,
       status: room.status,
       players: connectedPlayers.length
     });
   }
+  
   return rooms;
 }
 
-// Helper function to broadcast room updates
+// Clean up expired rooms
+function cleanupExpiredRooms() {
+  const now = Date.now();
+  let cleanupCount = 0;
+  
+  for (const [roomId, room] of gameRooms.entries()) {
+    // Remove rooms where host has been disconnected beyond grace period
+    if (room.hostDisconnectedAt && now - room.hostDisconnectedAt > CONFIG.ROOM_GRACE_PERIOD) {
+      gameRooms.delete(roomId);
+      cleanupCount++;
+      logDebug(`Removed expired room ${roomId} (host disconnected for too long)`);
+    }
+    
+    // Also clean up very old rooms (24 hours)
+    if (now - room.createdAt > 24 * 60 * 60 * 1000) {
+      gameRooms.delete(roomId);
+      cleanupCount++;
+      logDebug(`Removed room ${roomId} (older than 24 hours)`);
+    }
+  }
+  
+  if (cleanupCount > 0) {
+    logDebug(`Cleaned up ${cleanupCount} expired rooms`);
+  }
+}
+
+// Setup cleanup interval
+setInterval(cleanupExpiredRooms, CONFIG.CLEANUP_INTERVAL);
+
+// Helper to broadcast room updates to all clients in a room
 function broadcastRoomUpdate(roomId) {
   const room = gameRooms.get(roomId);
   if (!room) return;
-
-  const players = Object.values(room.players).map(p => ({
+  
+  // Convert players object to array for client consumption
+  const playersList = Object.values(room.players).map(p => ({
     id: p.id,
     name: p.name,
     connected: p.connected,
     isHost: p.isHost
   }));
-
+  
+  // Send update to all clients in the room
   io.to(roomId).emit('roomUpdate', {
     roomId: roomId,
-    players: players,
+    players: playersList,
     status: room.status
   });
 }
+
+// Express routes
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/game.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'game.html'));
+});
+
+app.get('/controller.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'controller.html'));
+});
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -67,12 +136,17 @@ io.on('connection', (socket) => {
   
   // Create a new room
   socket.on('createRoom', (data) => {
-    const roomId = generateRoomId();
+    // Generate a unique room ID
+    let roomId;
+    do {
+      roomId = generateRoomId();
+    } while (gameRooms.has(roomId));
+    
     const hostToken = data.hostToken || Math.random().toString(36).substring(2, 15);
     
     logDebug(`Creating room: ${roomId} with host: ${socket.id}`);
     
-    // Create new room in memory
+    // Create new room with persistent data
     gameRooms.set(roomId, {
       id: roomId,
       hostToken: hostToken,
@@ -83,7 +157,9 @@ io.on('connection', (socket) => {
         cups: {},
         scores: {}
       },
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      lastActivity: Date.now(),
+      hostDisconnectedAt: null // Track when host disconnects
     });
     
     // Add host as a player
@@ -94,12 +170,15 @@ io.on('connection', (socket) => {
       isHost: true
     };
     
-    // Join the room socket
+    // Join the socket room
     socket.join(roomId);
     socket.currentRoom = roomId;
     
     logDebug(`Room created successfully: ${roomId}`);
     logDebug(`Current rooms:`, Array.from(gameRooms.keys()));
+    
+    // Store room ID on socket for reconnection logic
+    socket.hostRoom = roomId;
     
     // Send room creation response
     socket.emit('roomCreated', {
@@ -142,8 +221,14 @@ io.on('connection', (socket) => {
     
     logDebug(`Room ${roomId} found, processing join request`);
     
+    // Update room activity timestamp
+    room.lastActivity = Date.now();
+    
     // Handle joining as host
     if (isHost) {
+      // Clear host disconnection time since we have a host now
+      room.hostDisconnectedAt = null;
+      
       // Validate host token if provided
       if (hostToken && room.hostToken !== hostToken) {
         socket.emit('joinResponse', {
@@ -154,9 +239,10 @@ io.on('connection', (socket) => {
         return;
       }
       
-      // Join as host
+      // Join socket room
       socket.join(roomId);
       socket.currentRoom = roomId;
+      socket.hostRoom = roomId; // Track that this is a host socket
       
       // If host is reconnecting, update their connection status
       if (room.players[socket.id]) {
@@ -294,15 +380,15 @@ io.on('connection', (socket) => {
     
     logDebug(`Game starting in room ${roomId}, first player: ${firstPlayer.name}`);
     
+    // Track active player
+    room.activePlayerId = firstPlayer.id;
+    
     // Send game started event to all clients
     io.to(roomId).emit('gameStarted', {
       firstPlayer: firstPlayer.id,
       firstPlayerName: firstPlayer.name,
       gameState: room.gameState
     });
-    
-    // Track active player
-    room.activePlayerId = firstPlayer.id;
     
     // Update room list (no longer joinable as new room)
     io.emit('roomList', getActiveRooms());
@@ -314,6 +400,9 @@ io.on('connection', (socket) => {
     const room = gameRooms.get(roomId);
     if (!room || room.status !== 'playing') return;
     
+    // Update activity timestamp
+    room.lastActivity = Date.now();
+    
     // Forward throw to all clients in room
     socket.to(roomId).emit('throw', data);
   });
@@ -323,6 +412,9 @@ io.on('connection', (socket) => {
     const { roomId, cupIndex, playerId, remainingCups } = data;
     const room = gameRooms.get(roomId);
     if (!room || room.status !== 'playing') return;
+    
+    // Update activity timestamp
+    room.lastActivity = Date.now();
     
     // Update cup state
     if (room.gameState.cups[playerId]) {
@@ -379,6 +471,9 @@ io.on('connection', (socket) => {
     const { roomId } = data;
     const room = gameRooms.get(roomId);
     if (!room || room.status !== 'playing') return;
+    
+    // Update activity timestamp
+    room.lastActivity = Date.now();
     
     // Find next player for turn
     const activePlayers = Object.values(room.players)
@@ -439,6 +534,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     logDebug(`Client disconnected: ${socket.id}`);
     
+    // Handle normal disconnection
     if (socket.currentRoom) {
       const roomId = socket.currentRoom;
       const room = gameRooms.get(roomId);
@@ -447,14 +543,12 @@ io.on('connection', (socket) => {
         // Mark player as disconnected
         room.players[socket.id].connected = false;
         
-        // If host disconnected and game is waiting, close the room
+        // If host disconnected, start grace period but DON'T close the room
         const isHost = room.players[socket.id].isHost;
         
-        if (isHost && room.status === 'waiting') {
-          // Close room
-          logDebug(`Host disconnected, closing room ${roomId}`);
-          io.to(roomId).emit('roomClosed', { message: 'Host disconnected' });
-          gameRooms.delete(roomId);
+        if (isHost) {
+          logDebug(`Host disconnected from room ${roomId}, starting grace period`);
+          room.hostDisconnectedAt = Date.now();
         } else if (room.status === 'playing') {
           // Handle player disconnect during game
           // If active player disconnected, switch to next
@@ -474,9 +568,11 @@ io.on('connection', (socket) => {
                 activePlayer: nextPlayer
               });
             } else {
-              // No more active players, reset game
-              room.status = 'waiting';
-              io.to(roomId).emit('gameReset');
+              // No more active players, but don't reset yet
+              io.to(roomId).emit('playerDisconnected', {
+                playerId: socket.id,
+                message: 'All players disconnected'
+              });
             }
           } else {
             // Not active player, just notify
@@ -489,38 +585,16 @@ io.on('connection', (socket) => {
         // Broadcast room update
         broadcastRoomUpdate(roomId);
       }
-      
-      // Clean up completely empty rooms
-      for (const [roomId, room] of gameRooms.entries()) {
-        const connectedPlayers = Object.values(room.players).filter(p => p.connected);
-        if (connectedPlayers.length === 0) {
-          logDebug(`Removing empty room: ${roomId}`);
-          gameRooms.delete(roomId);
-        }
-      }
-      
-      // Update room list
-      io.emit('roomList', getActiveRooms());
     }
+    
+    // Update room list
+    io.emit('roomList', getActiveRooms());
   });
-});
-
-// Routes
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.get('/game.html', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'game.html'));
-});
-
-app.get('/controller.html', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'controller.html'));
 });
 
 // Start the server
 const PORT = process.env.PORT || 3001;
 http.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Open a browser and navigate to http://localhost:${PORT}`);
+  console.log(`Open a browser and navigate to ${CONFIG.BASE_URL || `http://localhost:${PORT}`}`);
 });
