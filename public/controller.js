@@ -2,6 +2,7 @@
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 
+// Validate room parameter
 if (!roomId) {
   alert('No room ID provided. Please use the QR code to join a game.');
   window.location.href = '/';
@@ -32,6 +33,7 @@ let isThrowing = false;
 let cupState = Array(6).fill(true);
 let motionPermissionGranted = false;
 let gameStarted = false;
+let joiningInProgress = false;
 
 // Orientation tracking
 let initialOrientation = { beta: 0, gamma: 0 };
@@ -43,6 +45,17 @@ let velocityReadings = [];
 
 // Connect to Socket.io server
 const socket = io();
+
+// Show a connection status indicator
+const connectionIndicator = document.createElement('div');
+connectionIndicator.style.position = 'absolute';
+connectionIndicator.style.top = '5px';
+connectionIndicator.style.right = '5px';
+connectionIndicator.style.width = '10px';
+connectionIndicator.style.height = '10px';
+connectionIndicator.style.borderRadius = '50%';
+connectionIndicator.style.backgroundColor = '#ccc';
+document.body.appendChild(connectionIndicator);
 
 // Update debug display with orientation data
 function updateDebug() {
@@ -193,8 +206,8 @@ function initOrientationTracking() {
   });
 }
 
-// Start throw
-throwButton.addEventListener('touchstart', (e) => {
+// Start throw handler
+function startThrow(e) {
   e.preventDefault();
   
   if (!isMyTurn) {
@@ -225,10 +238,10 @@ throwButton.addEventListener('touchstart', (e) => {
   
   // Visual feedback for throwing
   throwButton.style.backgroundColor = '#f44336'; // Red while holding
-});
+}
 
-// End throw and calculate trajectory
-throwButton.addEventListener('touchend', (e) => {
+// End throw handler
+function endThrow(e) {
   e.preventDefault();
   if (!isThrowing) return;
   isThrowing = false;
@@ -300,13 +313,36 @@ throwButton.addEventListener('touchend', (e) => {
   // Disable throw button until server confirms turn change
   throwButton.disabled = true;
   isMyTurn = false;
-});
+}
 
-// Handle name submission
-nameSubmit.addEventListener('click', () => {
+// Setup event listeners
+function setupEventListeners() {
+  // Throw button events for both touch and mouse
+  throwButton.addEventListener('touchstart', startThrow);
+  throwButton.addEventListener('mousedown', startThrow);
+  
+  throwButton.addEventListener('touchend', endThrow);
+  throwButton.addEventListener('mouseup', endThrow);
+  
+  // Name submission
+  nameSubmit.addEventListener('click', submitName);
+  
+  // Enter key also submits name
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      submitName();
+    }
+  });
+}
+
+// Submit player name
+function submitName() {
+  if (joiningInProgress) return;
+  
   const playerName = nameInput.value.trim() || 'Player';
   
   if (playerName) {
+    joiningInProgress = true;
     nameSubmit.disabled = true;
     nameSubmit.textContent = 'Joining...';
     
@@ -316,22 +352,54 @@ nameSubmit.addEventListener('click', () => {
       name: playerName,
       isController: true
     });
+    
+    // Add timeout to prevent UI from getting stuck
+    setTimeout(() => {
+      if (joiningInProgress) {
+        joiningInProgress = false;
+        nameSubmit.disabled = false;
+        nameSubmit.textContent = 'Join Game';
+        alert('Joining timed out. Please try again.');
+      }
+    }, 5000);
   }
-});
-
-// Enter key also submits name
-nameInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    nameSubmit.click();
-  }
-});
+}
 
 // Socket.io event handlers
 socket.on('connect', () => {
   console.log('Connected to server');
+  connectionIndicator.style.backgroundColor = '#4CAF50'; // Green when connected
+});
+
+socket.on('disconnect', () => {
+  console.log('Disconnected from server');
+  connectionIndicator.style.backgroundColor = '#f44336'; // Red when disconnected
+  
+  // Show waiting overlay
+  waitingOverlay.style.display = 'flex';
+  waitingMessage.textContent = 'Disconnected from server';
+  waitingSubMessage.textContent = 'Trying to reconnect...';
+  
+  // Reset state
+  gameStarted = false;
+  isMyTurn = false;
+});
+
+socket.on('error', (errorMessage) => {
+  console.error('Socket error:', errorMessage);
+  alert(`Error: ${errorMessage}`);
+  
+  // Reset join state if needed
+  if (joiningInProgress) {
+    joiningInProgress = false;
+    nameSubmit.disabled = false;
+    nameSubmit.textContent = 'Join Game';
+  }
 });
 
 socket.on('joinResponse', (data) => {
+  joiningInProgress = false;
+  
   if (data.success) {
     // Hide the name form and show game controls
     nameForm.style.display = 'none';
@@ -345,21 +413,35 @@ socket.on('joinResponse', (data) => {
     // Setup the game
     if (data.gameState && data.gameState.cups && data.gameState.cups[playerInfo.id]) {
       cupState = data.gameState.cups[playerInfo.id];
+      gameStarted = true;
     }
+    
     setupCupDisplay();
     setupMotionPermission();
+    setupEventListeners();
     
     // Update document title
     document.title = `Game Controller - ${playerInfo.name}`;
     
     // If game already started, update waiting overlay message
-    if (data.gameState && data.gameState.round > 1) {
+    if (data.gameState && data.gameState.round > 0) {
       waitingMessage.textContent = 'Game already in progress';
       waitingSubMessage.textContent = 'Please wait for your turn';
+      waitingOverlay.style.display = 'flex';
+    } else {
+      waitingOverlay.style.display = 'flex';
+      waitingMessage.textContent = 'Waiting for game to start...';
+      waitingSubMessage.textContent = 'The host will start the game when all players are ready';
     }
   } else {
     alert(`Failed to join game: ${data.message}`);
-    window.location.href = '/';
+    nameSubmit.disabled = false;
+    nameSubmit.textContent = 'Join Game';
+    
+    // If room doesn't exist, return to lobby
+    if (data.message && data.message.includes('not found')) {
+      window.location.href = '/';
+    }
   }
 });
 
@@ -523,11 +605,8 @@ socket.on('playerWon', (data) => {
     
     // Create a sorted array of players by score
     const playerScores = Object.keys(data.scores).map(id => {
-      const playerName = id === socket.id ? 'You' : 
-        (players && players.find(p => p.id === id)?.name || 'Player');
-      
       return {
-        name: playerName,
+        name: id === socket.id ? 'You' : (id === winner.id ? winner.name : 'Other Player'),
         score: data.scores[id]
       };
     }).sort((a, b) => b.score - a.score);
@@ -580,8 +659,7 @@ socket.on('roomClosed', () => {
   window.location.href = '/';
 });
 
-socket.on('disconnect', () => {
-  waitingOverlay.style.display = 'flex';
-  waitingMessage.textContent = 'Disconnected from server';
-  waitingSubMessage.textContent = 'Trying to reconnect...';
+// Initialize the app
+window.addEventListener('load', () => {
+  setupEventListeners();
 });

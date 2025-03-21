@@ -1,18 +1,33 @@
+// Game initialization
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 const isHost = urlParams.get('host') === 'true';
 const isSpectator = urlParams.get('spectator') === 'true';
 const hostToken = urlParams.get('token');
 
-
+// Validate room parameter
 if (!roomId) {
   alert('No room ID provided.');
   window.location.href = '/';
 }
 
+// Socket.io connection
 const socket = io();
 
-// Scene setup
+// Room and game state
+let gameStarted = false;
+let ballInFlight = false;
+let lastThrowTime = 0;
+const resetDelay = 5000; // 5 seconds
+let activePlayer = null;
+let players = [];
+let playerCupStates = {}; // Map of player ID to cup states
+let currentCups = []; // Current set of cups in the scene
+let gameState = {
+  round: 1
+};
+
+// THREE.js scene setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -24,7 +39,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
 
-// Add some basic lighting
+// Add lighting
 const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
 scene.add(ambientLight);
 
@@ -154,7 +169,7 @@ function createCups() {
   return cups;
 }
 
-// Ball
+// Ball setup
 const ballRadius = 0.05;
 const ballGeometry = new THREE.SphereGeometry(ballRadius, 32, 32);
 const ballMeshMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff });
@@ -171,20 +186,6 @@ const ballBody = new CANNON.Body({
 });
 ballBody.position.set(0, 1, -3); // Starting position
 world.addBody(ballBody);
-
-
-// Game state variables
-let gameStarted = false;
-let ballInFlight = false;
-let lastThrowTime = 0;
-const resetDelay = 5000; // 5 seconds
-let activePlayer = null;
-let players = [];
-let playerCupStates = {}; // Map of player ID to cup states
-let currentCups = []; // Current set of cups in the scene
-let gameState = {
-  round: 1
-};
 
 // UI Elements
 const qrModal = document.getElementById('qrModal');
@@ -283,8 +284,9 @@ function updatePlayerList() {
       
       const isActive = activePlayer && player.id === activePlayer.id;
       const activeClass = isActive ? 'style="color: #4CAF50; font-weight: bold;"' : '';
+      const disconnectedClass = !player.connected ? 'style="color: #999; font-style: italic;"' : '';
       
-      html += `<div ${activeClass}>
+      html += `<div ${isActive ? activeClass : disconnectedClass}>
         ${player.name}: ${remainingCups} cups left
         ${!player.connected ? ' (Disconnected)' : ''}
       </div>`;
@@ -303,7 +305,7 @@ function updatePlayerListInModal() {
     const list = document.createElement('ol');
     
     players.forEach(player => {
-      if (player.connected) {
+      if (player.connected && !player.isHost) {
         const item = document.createElement('li');
         item.textContent = player.name;
         list.appendChild(item);
@@ -374,6 +376,7 @@ function loadPlayerCups(playerId) {
   currentCups.forEach((cup, index) => {
     if (!cupState[index]) {
       scene.remove(cup.mesh);
+      world.removeBody(cup.body);
       cup.active = false;
     }
   });
@@ -381,406 +384,476 @@ function loadPlayerCups(playerId) {
 
 // Show QR code for joining
 function showQRCode() {
-    if (isHost) {
-      // Clear any existing QR code
-      qrcode.innerHTML = '';
-      qrRoomID.textContent = roomId;
-      
-      // Generate QR code
-      const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
-      
-      new QRCode(qrcode, {
-        text: joinUrl,
-        width: 200,
-        height: 200,
-        colorDark: "#000000",
-        colorLight: "#ffffff",
-        correctLevel: QRCode.CorrectLevel.H
-      });
-      
-      // Add link text below QR
-      const linkEl = document.createElement('div');
-      linkEl.style.marginTop = '10px';
-      linkEl.style.wordBreak = 'break-all';
-      linkEl.innerHTML = `<a href="${joinUrl}" target="_blank">${joinUrl}</a>`;
-      qrcode.appendChild(linkEl);
-      
-      qrModal.style.display = 'flex';
-      updatePlayerListInModal();
-    }
+  if (isHost) {
+    // Clear any existing QR code
+    qrcode.innerHTML = '';
+    qrRoomID.textContent = roomId;
+    
+    // Generate QR code with the room ID
+    const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
+    
+    new QRCode(qrcode, {
+      text: joinUrl,
+      width: 200,
+      height: 200,
+      colorDark: "#000000",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.H
+    });
+    
+    // Add link text below QR
+    const linkEl = document.createElement('div');
+    linkEl.style.marginTop = '10px';
+    linkEl.style.wordBreak = 'break-all';
+    linkEl.innerHTML = `<a href="${joinUrl}" target="_blank">${joinUrl}</a>`;
+    qrcode.appendChild(linkEl);
+    
+    qrModal.style.display = 'flex';
+    updatePlayerListInModal();
+  }
 }
 
 // Collision detection for cups
 ballBody.addEventListener('collide', (event) => {
-    if (!gameStarted || !ballInFlight || !isHost) return;
+  if (!gameStarted || !ballInFlight || !isHost) return;
+  
+  const otherBody = event.body;
+  
+  // Find if we hit a cup
+  const hitCupIndex = currentCups.findIndex(cup => cup.body === otherBody && cup.active);
+  
+  if (hitCupIndex >= 0) {
+    const hitCup = currentCups[hitCupIndex];
     
-    const otherBody = event.body;
-    
-    // Find if we hit a cup
-    const hitCupIndex = currentCups.findIndex(cup => cup.body === otherBody && cup.active);
-    
-    if (hitCupIndex >= 0) {
-      const hitCup = currentCups[hitCupIndex];
+    // Check if the ball is above the cup's midpoint (successful throw)
+    if (ballBody.position.y > hitCup.body.position.y + 0.15) {
+      // Add visual effect for hit
+      const hitFlash = new THREE.Mesh(
+        new THREE.SphereGeometry(0.3, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.7 })
+      );
+      hitFlash.position.copy(hitCup.mesh.position);
+      scene.add(hitFlash);
       
-      // Check if the ball is above the cup's midpoint (successful throw)
-      if (ballBody.position.y > hitCup.body.position.y + 0.15) {
-        // Add visual effect for hit
-        const hitFlash = new THREE.Mesh(
-          new THREE.SphereGeometry(0.3, 16, 16),
-          new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.7 })
-        );
-        hitFlash.position.copy(hitCup.mesh.position);
-        scene.add(hitFlash);
+      // Animate and remove the flash
+      const startTime = Date.now();
+      const animateFlash = () => {
+        const elapsed = Date.now() - startTime;
+        if (elapsed > 500) {
+          scene.remove(hitFlash);
+          return;
+        }
         
-        // Animate and remove the flash
-        const startTime = Date.now();
-        const animateFlash = () => {
-          const elapsed = Date.now() - startTime;
-          if (elapsed > 500) {
-            scene.remove(hitFlash);
-            return;
+        hitFlash.material.opacity = 0.7 * (1 - elapsed / 500);
+        hitFlash.scale.set(1 + elapsed / 250, 1 + elapsed / 250, 1 + elapsed / 250);
+        
+        requestAnimationFrame(animateFlash);
+      };
+      animateFlash();
+      
+      // Hide the cup
+      scene.remove(hitCup.mesh);
+      world.removeBody(hitCup.body);
+      hitCup.active = false;
+      
+      // Update the player's cup state
+      if (activePlayer) {
+        const playerCups = playerCupStates[activePlayer.id];
+        if (playerCups) {
+          playerCups[hitCup.index] = false;
+          
+          // Count remaining cups
+          const remainingCups = playerCups.filter(cup => cup).length;
+          
+          // Notify server about the hit
+          socket.emit('cupHit', {
+            roomId,
+            cupIndex: hitCup.index,
+            playerId: activePlayer.id,
+            remainingCups: remainingCups
+          });
+          
+          // Update game status with hit message
+          gameStatus.textContent = `${activePlayer.name} hit a cup! (${remainingCups} cups left)`;
+          
+          // Play hit sound
+          try {
+            const hitSound = new Audio('https://actions.google.com/sounds/v1/sports/golf_ball_in_cup.ogg');
+            hitSound.volume = 0.5;
+            hitSound.play();
+          } catch (e) {
+            console.log('Sound not available');
           }
           
-          hitFlash.material.opacity = 0.7 * (1 - elapsed / 500);
-          hitFlash.scale.set(1 + elapsed / 250, 1 + elapsed / 250, 1 + elapsed / 250);
-          
-          requestAnimationFrame(animateFlash);
-        };
-        animateFlash();
-        
-        // Hide the cup
-        scene.remove(hitCup.mesh);
-        hitCup.active = false;
-        
-        // Update the player's cup state
-        if (activePlayer) {
-          const playerCups = playerCupStates[activePlayer.id];
-          if (playerCups) {
-            playerCups[hitCup.index] = false;
-            
-            // Count remaining cups
-            const remainingCups = playerCups.filter(cup => cup).length;
-            
-            // Notify server about the hit
-            socket.emit('cupHit', {
-              roomId,
-              cupIndex: hitCup.index,
-              playerId: activePlayer.id,
-              remainingCups: remainingCups
-            });
-            
-            // Update game status with hit message
-            gameStatus.textContent = `${activePlayer.name} hit a cup! (${remainingCups} cups left)`;
-            
-            // Play hit sound
-            try {
-              const hitSound = new Audio('https://actions.google.com/sounds/v1/sports/golf_ball_in_cup.ogg');
-              hitSound.volume = 0.5;
-              hitSound.play();
-            } catch (e) {
-              console.log('Sound not available');
-            }
-            
-            // Reset ball
-            resetBall();
-          }
+          // Reset ball after short delay to see it drop in
+          setTimeout(resetBall, 500);
         }
       }
     }
-  });
-  
-  // Button event listeners
-  startGameBtn.addEventListener('click', () => {
-    if (isHost) {
-      // Only allow starting if we have at least 1 player
-      if (players.length === 0) {
-        alert('Need at least one player to start the game.');
-        return;
-      }
-      
-      startGameBtn.disabled = true;
-      startGameBtn.textContent = 'Starting...';
-      socket.emit('startGame', roomId);
+  }
+});
+
+// Button event listeners
+startGameBtn.addEventListener('click', () => {
+  if (isHost) {
+    // Only allow starting if we have at least 1 player
+    const connectedPlayers = players.filter(p => p.connected && !p.isHost);
+    
+    if (connectedPlayers.length === 0) {
+      alert('Need at least one player to start the game.');
+      return;
     }
-  });
+    
+    startGameBtn.disabled = true;
+    startGameBtn.textContent = 'Starting...';
+    socket.emit('startGame', roomId);
+  }
+});
+
+closeQRModal.addEventListener('click', () => {
+  qrModal.style.display = 'none';
+});
+
+newGameBtn.addEventListener('click', () => {
+  // Reset game and start a new one
+  if (isHost) {
+    socket.emit('resetGame', roomId);
+    winnerModal.style.display = 'none';
+  }
+});
+
+returnToLobbyBtn.addEventListener('click', () => {
+  window.location.href = '/';
+});
+
+// Socket connection and event handling
+socket.on('connect', () => {
+  console.log('Connected to server');
   
-  closeQRModal.addEventListener('click', () => {
-    qrModal.style.display = 'none';
+  // Join room with appropriate role
+  socket.emit('joinRoom', {
+    roomId: roomId,
+    isHost: isHost,
+    isSpectator: isSpectator,
+    hostToken: hostToken
   });
-  
-  newGameBtn.addEventListener('click', () => {
-    // Reset game and start a new one
-    if (isHost) {
-      socket.emit('resetGame', roomId);
-      winnerModal.style.display = 'none';
-    }
-  });
-  
-  returnToLobbyBtn.addEventListener('click', () => {
+});
+
+socket.on('joinResponse', (data) => {
+  if (!data.success) {
+    // Handle failed join
+    alert(data.message || 'Failed to join the game room.');
     window.location.href = '/';
-  });
+    return;
+  }
   
-  // Socket event handlers
-  socket.on('connect', () => {
-    console.log('Connected to server');
-    
-    if (isHost || isSpectator) {
-      // Join the room with host token if available
-      socket.emit('joinRoom', {
-        roomId: roomId,
-        isHost: isHost,
-        isController: !isSpectator && !isHost,
-        hostToken: hostToken
-      });
-    }
-  });
+  console.log('Successfully joined room:', data);
   
-  socket.on('joinResponse', (data) => {
-    if (!data.success) {
-      // Show error and redirect
-      alert(data.message || 'Failed to join the game room.');
-      window.location.href = '/';
-    } else {
-      // Successfully joined the room
-      console.log('Joined room:', data.roomId);
-      
-      // If host, show QR code
-      if (isHost) {
-        showQRCode();
-      }
-    }
-  });
+  // If host, show QR code for player joining
+  if (isHost) {
+    showQRCode();
+  }
   
-  
-  socket.on('roomUpdate', (data) => {
-    players = data.players;
-    
-    updatePlayerList();
-    updateGameInfo();
-    
-    // Update player count in QR modal
-    if (isHost) {
-      playerCount.textContent = players.filter(p => p.connected).length;
-      updatePlayerListInModal();
-      
-      // Enable/disable start button based on player count
-      startGameBtn.disabled = players.length === 0;
-    }
-  });
-  
-  socket.on('gameStarted', (data) => {
-    // Close the QR code modal
-    qrModal.style.display = 'none';
-    
+  // If game is already in progress, apply game state
+  if (data.gameState) {
+    gameState = data.gameState;
+    playerCupStates = data.gameState.cups || {};
     gameStarted = true;
-    activePlayer = players.find(p => p.id === data.firstPlayer);
     
-    // Initialize all player cup states if not already done
+    updateGameInfo();
+    updatePlayerList();
+  }
+});
+
+socket.on('roomUpdate', (data) => {
+  console.log('Room update:', data);
+  
+  players = data.players;
+  
+  // Update UI
+  updatePlayerList();
+  updateGameInfo();
+  
+  // Update player count in QR modal
+  if (isHost) {
+    const connectedPlayers = players.filter(p => p.connected && !p.isHost).length;
+    playerCount.textContent = connectedPlayers;
+    updatePlayerListInModal();
+    
+    // Enable/disable start button based on player count
+    startGameBtn.disabled = connectedPlayers === 0 || gameStarted;
+  }
+});
+
+socket.on('gameStarted', (data) => {
+  console.log('Game started:', data);
+  
+  // Close QR modal
+  qrModal.style.display = 'none';
+  
+  gameStarted = true;
+  
+  // Find active player in our local players array
+  activePlayer = players.find(p => p.id === data.firstPlayer);
+  
+  // Initialize cup states for players
+  if (data.gameState && data.gameState.cups) {
+    playerCupStates = data.gameState.cups;
+  } else {
+    // Initialize with defaults if not provided
     players.forEach(player => {
       if (!playerCupStates[player.id]) {
         playerCupStates[player.id] = Array(6).fill(true);
       }
     });
+  }
+  
+  // Load cups for first player
+  if (activePlayer) {
+    loadPlayerCups(activePlayer.id);
+    gameStatus.textContent = `Game started! ${activePlayer.name}'s turn`;
+  }
+  
+  // Update UI
+  updateGameInfo();
+  updatePlayerList();
+  
+  // Play start sound
+  try {
+    const startSound = new Audio('https://actions.google.com/sounds/v1/sports/tennis_racket_hitting_ball.ogg');
+    startSound.volume = 0.5;
+    startSound.play();
+  } catch (e) {
+    console.log('Sound not available');
+  }
+});
+
+socket.on('throw', (data) => {
+  if (gameStarted && !ballInFlight) {
+    // Extract velocity data
+    const velocityData = data.velocity;
     
-    // Load the cups for the first player
-    if (activePlayer) {
-      loadPlayerCups(activePlayer.id);
-      gameStatus.textContent = `Game started! ${activePlayer.name}'s turn`;
-    }
+    // Reset ball position for throw
+    ballBody.position.set(0, 1, -3);
     
-    updateGameInfo();
-    updatePlayerList();
+    // Apply the velocity
+    ballBody.velocity.set(
+      velocityData.x,
+      velocityData.y,
+      velocityData.z
+    );
     
-    // Play start sound
-    try {
-      const startSound = new Audio('https://actions.google.com/sounds/v1/sports/tennis_racket_hitting_ball.ogg');
-      startSound.volume = 0.5;
-      startSound.play();
-    } catch (e) {
-      console.log('Sound not available');
-    }
+    // Apply a small random rotation to make it more realistic
+    ballBody.angularVelocity.set(
+      (Math.random() - 0.5) * 5,
+      (Math.random() - 0.5) * 5,
+      (Math.random() - 0.5) * 5
+    );
+    
+    // Update game state
+    ballInFlight = true;
+    lastThrowTime = Date.now();
+    
+    // Update status
+    gameStatus.textContent = `${activePlayer ? activePlayer.name : 'Player'} is throwing...`;
+  }
+});
+
+socket.on('turnChange', (data) => {
+  console.log('Turn change:', data);
+  
+  // Update active player
+  activePlayer = data.activePlayer;
+  
+  // If game state provided, update it
+  if (data.gameState) {
+    gameState = data.gameState;
+    playerCupStates = data.gameState.cups || playerCupStates;
+  }
+  
+  // Update game status
+  gameStatus.textContent = `${activePlayer.name}'s turn`;
+  
+  // Load the cups for the current player
+  loadPlayerCups(activePlayer.id);
+  
+  // Update UI
+  updateGameInfo();
+  updatePlayerList();
+  
+  // Make sure ball is reset
+  resetBall();
+});
+
+socket.on('newRound', (data) => {
+  gameState.round = data.round;
+  gameStatus.textContent = `Round ${data.round} started! ${data.activePlayer.name}'s turn`;
+  updateGameInfo();
+  
+  // Display new round notification
+  const roundAlert = document.createElement('div');
+  roundAlert.textContent = `Round ${data.round} started!`;
+  roundAlert.style.position = 'fixed';
+  roundAlert.style.top = '50%';
+  roundAlert.style.left = '50%';
+  roundAlert.style.transform = 'translate(-50%, -50%)';
+  roundAlert.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+  roundAlert.style.color = 'white';
+  roundAlert.style.padding = '20px';
+  roundAlert.style.borderRadius = '10px';
+  roundAlert.style.fontSize = '24px';
+  roundAlert.style.zIndex = '1000';
+  
+  document.body.appendChild(roundAlert);
+  
+  // Remove the alert after 2 seconds
+  setTimeout(() => {
+    document.body.removeChild(roundAlert);
+  }, 2000);
+});
+
+socket.on('playerWon', (data) => {
+  const winner = data.player;
+  
+  // Show winner modal
+  if (data.isTie) {
+    const tiedPlayers = data.tiedPlayers.map(p => p.name).join(' and ');
+    winnerText.textContent = `It's a tie between ${tiedPlayers}!`;
+  } else {
+    winnerText.textContent = `🏆 ${winner.name} won the game! 🏆`;
+  }
+  
+  // Display final scores
+  let scoresHtml = '<h3>Final Scores</h3>';
+  const scores = data.scores;
+  
+  // Create a sorted array of players by score
+  const playerScores = Object.keys(scores).map(id => {
+    const player = players.find(p => p.id === id);
+    return {
+      name: player ? player.name : 'Unknown Player',
+      score: scores[id]
+    };
+  }).sort((a, b) => b.score - a.score);
+  
+  // Create HTML for scores
+  playerScores.forEach((player, index) => {
+    scoresHtml += `<div>${index + 1}. ${player.name}: ${player.score} points</div>`;
   });
   
-  socket.on('throw', (data) => {
-    if (gameStarted && !ballInFlight) {
-      // Extract velocity data
-      const velocityData = data.velocity;
-      
-      // Reset ball position for throw
-      ballBody.position.set(0, 1, -3);
-      
-      // Apply the velocity
-      ballBody.velocity.set(
-        velocityData.x,
-        velocityData.y,
-        velocityData.z
-      );
-      
-      // Apply a small random rotation to make it more realistic
-      ballBody.angularVelocity.set(
-        (Math.random() - 0.5) * 5,
-        (Math.random() - 0.5) * 5,
-        (Math.random() - 0.5) * 5
-      );
-      
-      // Update game state
-      ballInFlight = true;
-      lastThrowTime = Date.now();
-      
-      // Update status
-      gameStatus.textContent = `${activePlayer ? activePlayer.name : 'Player'} is throwing...`;
-    }
-  });
+  finalScores.innerHTML = scoresHtml;
+  winnerModal.style.display = 'flex';
   
-  socket.on('turnChange', (data) => {
+  // End game state
+  gameStarted = false;
+  
+  // Play victory sound
+  try {
+    const winSound = new Audio('https://actions.google.com/sounds/v1/sports/crowd_cheer.ogg');
+    winSound.volume = 0.5;
+    winSound.play();
+  } catch (e) {
+    console.log('Sound not available');
+  }
+});
+
+socket.on('playerDisconnected', (data) => {
+  console.log('Player disconnected:', data);
+  
+  // Update player in local list
+  const disconnectedPlayer = players.find(p => p.id === data.playerId);
+  if (disconnectedPlayer) {
+    disconnectedPlayer.connected = false;
+  }
+  
+  // If active player changed, update it
+  if (data.activePlayer) {
     activePlayer = data.activePlayer;
-    
-    // Update game status
-    gameStatus.textContent = `${activePlayer.name}'s turn`;
     
     // Load the cups for the current player
     loadPlayerCups(activePlayer.id);
     
-    // Update UI
-    updateGameInfo();
-    updatePlayerList();
-    
-    // Make sure ball is reset
-    resetBall();
-  });
-  
-  socket.on('newRound', (data) => {
-    gameState.round = data.round;
-    gameStatus.textContent = `Round ${data.round} started! ${data.activePlayer.name}'s turn`;
-    updateGameInfo();
-  });
-  
-  socket.on('playerWon', (data) => {
-    const winner = data.player;
-    
-    // Show winner modal
-    if (data.isTie) {
-      const tiedPlayers = data.tiedPlayers.map(p => p.name).join(' and ');
-      winnerText.textContent = `It's a tie between ${tiedPlayers}!`;
-    } else {
-      winnerText.textContent = `🏆 ${winner.name} won the game! 🏆`;
-    }
-    
-    // Display final scores
-    let scoresHtml = '<h3>Final Scores</h3>';
-    const scores = data.scores;
-    
-    // Create a sorted array of players by score
-    const playerScores = Object.keys(scores).map(id => {
-      const player = players.find(p => p.id === id);
-      return {
-        name: player ? player.name : 'Unknown Player',
-        score: scores[id]
-      };
-    }).sort((a, b) => b.score - a.score);
-    
-    // Create HTML for scores
-    playerScores.forEach((player, index) => {
-      scoresHtml += `<div>${index + 1}. ${player.name}: ${player.score} points</div>`;
-    });
-    
-    finalScores.innerHTML = scoresHtml;
-    winnerModal.style.display = 'flex';
-    
-    // End game state
-    gameStarted = false;
-    
-    // Play victory sound
-    try {
-      const winSound = new Audio('https://actions.google.com/sounds/v1/sports/crowd_cheer.ogg');
-      winSound.volume = 0.5;
-      winSound.play();
-    } catch (e) {
-      console.log('Sound not available');
-    }
-  });
-  
-  socket.on('playerDisconnected', (data) => {
-    // Update the active player if needed
-    if (data.activePlayer) {
-      activePlayer = data.activePlayer;
-      
-      // Load the cups for the current player
-      loadPlayerCups(activePlayer.id);
-      
-      // Update status
-      gameStatus.textContent = `Player disconnected. ${activePlayer.name}'s turn`;
-    }
-    
-    updatePlayerList();
-    if (isHost) {
-      updatePlayerListInModal();
-    }
-  });
-  
-  socket.on('gameReset', (data) => {
-    // Reset game state
-    gameStarted = false;
-    gameState.round = 1;
-    activePlayer = null;
-    playerCupStates = {};
-    
-    // Clear and reset cups
-    clearCups();
-    
-    // Reset ball
-    resetBall();
-    
-    // Hide winner modal if open
-    winnerModal.style.display = 'none';
-    
-    // If host, show QR modal again
-    if (isHost) {
-      startGameBtn.disabled = false;
-      startGameBtn.textContent = 'Start Game';
-      showQRCode();
-    }
-    
-    // Update UI
-    updateGameInfo();
-    updatePlayerList();
-    gameStatus.textContent = 'Game reset. Waiting for players...';
-  });
-  
-  socket.on('roomClosed', () => {
-    alert('The game room has been closed.');
-    window.location.href = '/';
-  });
-  
-  socket.on('disconnect', () => {
-    gameStatus.textContent = 'Disconnected from server. Trying to reconnect...';
-  });
-  
-  // Animation loop
-  function animate() {
-    requestAnimationFrame(animate);
-    
-    // Physics step
-    world.step(1 / 60); 
-    
-    // Sync ball mesh with physics body
-    ballMesh.position.copy(ballBody.position);
-    ballMesh.quaternion.copy(ballBody.quaternion);
-    
-    // Check if ball needs reset
-    if (ballInFlight && gameStarted) {
-      checkBallReset();
-    }
-    
-    renderer.render(scene, camera);
+    // Update status
+    gameStatus.textContent = `Player disconnected. ${activePlayer.name}'s turn`;
   }
   
-  // Start the animation loop
-  animate();
+  // Update UI
+  updatePlayerList();
+  if (isHost) {
+    updatePlayerListInModal();
+  }
+});
+
+socket.on('gameReset', () => {
+  console.log('Game reset');
   
-  // Handle window resize
-  window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+  // Reset game state
+  gameStarted = false;
+  gameState = { round: 1 };
+  activePlayer = null;
+  playerCupStates = {};
+  
+  // Clear cups
+  clearCups();
+  
+  // Reset ball
+  resetBall();
+  
+  // Hide winner modal if open
+  winnerModal.style.display = 'none';
+  
+  // If host, show QR modal again
+  if (isHost) {
+    startGameBtn.disabled = false;
+    startGameBtn.textContent = 'Start Game';
+    showQRCode();
+  }
+  
+  // Update UI
+  updateGameInfo();
+  updatePlayerList();
+  gameStatus.textContent = 'Game reset. Waiting for players...';
+});
+
+socket.on('roomClosed', () => {
+  alert('The game room has been closed.');
+  window.location.href = '/';
+});
+
+socket.on('disconnect', () => {
+  gameStatus.textContent = 'Disconnected from server. Trying to reconnect...';
+});
+
+socket.on('error', (message) => {
+  console.error('Socket error:', message);
+  alert(`Error: ${message}`);
+});
+
+// Animation loop
+function animate() {
+  requestAnimationFrame(animate);
+  
+  // Physics step
+  world.step(1 / 60); 
+  
+  // Sync ball mesh with physics body
+  ballMesh.position.copy(ballBody.position);
+  ballMesh.quaternion.copy(ballBody.quaternion);
+  
+  // Check if ball needs reset
+  if (ballInFlight && gameStarted) {
+    checkBallReset();
+  }
+  
+  renderer.render(scene, camera);
+}
+
+// Start the animation loop
+animate();
+
+// Handle window resize
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});

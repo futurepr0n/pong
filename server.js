@@ -2,81 +2,70 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
-const Database = require('better-sqlite3');
-
-// Open the database
-const db = new Database('game_rooms.db', { verbose: console.log });
-
-// Enable foreign key support
-db.prepare(`PRAGMA foreign_keys = ON;`).run();
-
-// Create tables
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS rooms (
-    room_id TEXT PRIMARY KEY,
-    host_token TEXT UNIQUE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    status TEXT DEFAULT 'waiting',
-    last_active DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`).run();
-
-db.prepare(`
-  CREATE TABLE IF NOT EXISTS room_players (
-    room_id TEXT,
-    player_id TEXT,
-    name TEXT,
-    is_host BOOLEAN DEFAULT 0,
-    is_connected BOOLEAN DEFAULT 1,
-    PRIMARY KEY (room_id, player_id),
-    FOREIGN KEY (room_id) REFERENCES rooms (room_id) ON DELETE CASCADE
-  )
-`).run();
 
 // Serve static files
 app.use(express.static('public'));
 
-// Base URL for QR codes
-const BASE_URL = process.env.BASE_URL || 'http://localhost:3001';
+// In-memory storage for game rooms and player data
+// This is more suitable for real-time games than SQLite
+const gameRooms = new Map();
 
-// Generate room ID
+// Generate unique room ID
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Clean up empty rooms
+// Clean up empty rooms (runs every 5 minutes)
 function cleanupEmptyRooms() {
-  try {
-    // First, remove players from rooms with no connected players
-    const playerCleanup = db.prepare(`
-      DELETE FROM room_players 
-      WHERE room_id IN (
-        SELECT room_id 
-        FROM rooms 
-        WHERE room_id NOT IN (
-          SELECT DISTINCT room_id 
-          FROM room_players 
-          WHERE is_connected = 1
-        ) AND status = 'waiting'
-      )
-    `);
-    playerCleanup.run();
-
-    // Then remove the empty rooms
-    const roomCleanup = db.prepare(`
-      DELETE FROM rooms 
-      WHERE room_id NOT IN (
-        SELECT DISTINCT room_id 
-        FROM room_players 
-        WHERE is_connected = 1
-      ) AND status = 'waiting'
-    `);
-    
-    const result = roomCleanup.run();
-    console.log(`Cleaned up ${result.changes} empty rooms`);
-  } catch (error) {
-    console.error('Room cleanup error:', error);
+  for (const [roomId, room] of gameRooms.entries()) {
+    // Remove rooms with no connected players
+    const connectedPlayers = Object.values(room.players).filter(p => p.connected);
+    if (connectedPlayers.length === 0 && room.status === 'waiting') {
+      console.log(`Cleaning up empty room: ${roomId}`);
+      gameRooms.delete(roomId);
+    }
   }
+}
+
+// Set interval for room cleanup
+setInterval(cleanupEmptyRooms, 300000); // 5 minutes
+
+// Get array of players from a room
+function getPlayersArray(room) {
+  return Object.values(room.players).map(player => ({
+    id: player.id,
+    name: player.name,
+    connected: player.connected,
+    isHost: player.isHost
+  }));
+}
+
+// Broadcast room update to all clients in a room
+function broadcastRoomUpdate(roomId) {
+  const room = gameRooms.get(roomId);
+  if (!room) return;
+
+  io.to(roomId).emit('roomUpdate', {
+    roomId: roomId,
+    players: getPlayersArray(room),
+    status: room.status
+  });
+}
+
+// Get public room list (for lobby)
+function getPublicRoomList() {
+  const rooms = [];
+  for (const [roomId, room] of gameRooms.entries()) {
+    if (room.status === 'waiting') {
+      const connectedPlayers = Object.values(room.players).filter(p => p.connected);
+      rooms.push({
+        id: roomId,
+        status: room.status,
+        players: connectedPlayers.length
+      });
+    }
+  }
+  return rooms;
 }
 
 // Socket.io connection handling
@@ -86,238 +75,419 @@ io.on('connection', (socket) => {
   // Create a new room
   socket.on('createRoom', (data) => {
     const roomId = generateRoomId();
-    const hostToken = data.hostToken || 
-      Math.random().toString(36).substring(2, 15) + 
-      Math.random().toString(36).substring(2, 15);
+    const hostToken = data.hostToken || Math.random().toString(36).substring(2, 15);
     
-    try {
-      // Start a transaction to ensure atomic room and player creation
-      const transaction = db.transaction(() => {
-        // Insert room
-        const insertRoom = db.prepare(`
-          INSERT INTO rooms (room_id, host_token, status) 
-          VALUES (?, ?, 'waiting')
-        `);
-        insertRoom.run(roomId, hostToken);
-        
-        // Insert host as a player
-        const insertPlayer = db.prepare(`
-          INSERT INTO room_players (room_id, player_id, name, is_host) 
-          VALUES (?, ?, ?, 1)
-        `);
-        insertPlayer.run(roomId, socket.id, 'Host');
-        
-        return roomId;
-      });
-      
-      // Execute the transaction
-      const createdRoomId = transaction();
-      
-      // Join the room socket
-      socket.join(createdRoomId);
-      socket.currentRoom = createdRoomId;
-      
-      // Send room creation response
-      socket.emit('roomCreated', {
-        roomId: createdRoomId, 
-        joinUrl: `${BASE_URL}/controller.html?room=${createdRoomId}`,
-        hostToken: hostToken,
-        players: []
-      });
-      
-      console.log(`Room created: ${createdRoomId} by ${socket.id}`);
-    } catch (error) {
-      console.error('Room creation error:', error);
-      socket.emit('error', 'Failed to create room');
-    }
+    // Create new room in memory
+    gameRooms.set(roomId, {
+      id: roomId,
+      hostToken: hostToken,
+      status: 'waiting',
+      players: {},
+      gameState: {
+        round: 1,
+        cups: {},
+        scores: {}
+      },
+      createdAt: Date.now()
+    });
+    
+    // Add host as a player
+    gameRooms.get(roomId).players[socket.id] = {
+      id: socket.id,
+      name: 'Host',
+      connected: true,
+      isHost: true
+    };
+    
+    // Join the room socket
+    socket.join(roomId);
+    socket.currentRoom = roomId;
+    
+    // Send room creation response
+    socket.emit('roomCreated', {
+      roomId: roomId,
+      hostToken: hostToken,
+      players: getPlayersArray(gameRooms.get(roomId))
+    });
+    
+    console.log(`Room created: ${roomId} by ${socket.id}`);
+    
+    // Update room list for all clients in lobby
+    io.emit('roomList', getPublicRoomList());
   });
   
   // Get Room List
   socket.on('getRoomList', () => {
-    try {
-      // Get active rooms with player count
-      const getRooms = db.prepare(`
-        SELECT r.room_id, r.status, 
-               COUNT(rp.player_id) as player_count
-        FROM rooms r
-        LEFT JOIN room_players rp ON r.room_id = rp.room_id AND rp.is_connected = 1
-        WHERE r.status = 'waiting'
-        GROUP BY r.room_id
-      `);
-      
-      const rooms = getRooms.all().map(room => ({
-        id: room.room_id,
-        status: room.status,
-        players: Array(room.player_count).fill({}) // Placeholder for player data
-      }));
-      
-      socket.emit('roomList', rooms);
-    } catch (error) {
-      console.error('Error getting room list:', error);
-      socket.emit('error', 'Failed to retrieve room list');
-    }
+    socket.emit('roomList', getPublicRoomList());
   });
   
   // Join an existing room
   socket.on('joinRoom', (data) => {
-    const { roomId, name, isController, isHost, hostToken } = data;
+    const { roomId, name, isController, isHost, isSpectator, hostToken } = data;
     
-    try {
-      // Find the room
-      let room = db.prepare(`
-        SELECT * FROM rooms 
-        WHERE room_id = ?
-      `).get(roomId);
-      
-      // Room not found
-      if (!room) {
-        console.error(`Room not found: ${roomId}`);
-        socket.emit('joinResponse', { 
-          success: false, 
-          message: 'Room not found. It may have expired or been closed.',
-          roomId: roomId 
+    // Validate room exists
+    const room = gameRooms.get(roomId);
+    if (!room) {
+      console.error(`Room not found: ${roomId}`);
+      socket.emit('joinResponse', { 
+        success: false, 
+        message: 'Room not found. It may have expired or been closed.',
+        roomId: roomId 
+      });
+      return;
+    }
+    
+    // Handle joining as host
+    if (isHost) {
+      // Validate host token if provided
+      if (hostToken && room.hostToken !== hostToken) {
+        socket.emit('joinResponse', {
+          success: false,
+          message: 'Invalid host token',
+          roomId: roomId
         });
         return;
       }
       
-      // Transaction for adding/updating player
-      const transaction = db.transaction(() => {
-        if (isController) {
-          // Check if player already exists
-          const existingPlayer = db.prepare(`
-            SELECT * FROM room_players 
-            WHERE room_id = ? AND player_id = ?
-          `).get(room.room_id, socket.id);
-          
-          if (existingPlayer) {
-            // Update existing player
-            db.prepare(`
-              UPDATE room_players 
-              SET name = ?, is_connected = 1 
-              WHERE room_id = ? AND player_id = ?
-            `).run(
-              name || existingPlayer.name, 
-              room.room_id, 
-              socket.id
-            );
-          } else {
-            // Insert new player
-            db.prepare(`
-              INSERT INTO room_players (room_id, player_id, name, is_host) 
-              VALUES (?, ?, ?, 0)
-            `).run(
-              room.room_id, 
-              socket.id, 
-              name || `Player ${Date.now()}`
-            );
-          }
-          
-          // Get player details
-          const playerInfo = db.prepare(`
-            SELECT * FROM room_players 
-            WHERE room_id = ? AND player_id = ?
-          `).get(room.room_id, socket.id);
-          
-          return { 
-            success: true, 
-            roomId: room.room_id,
-            playerInfo: playerInfo,
-            isController: true
-          };
-        } else if (isHost) {
-          // Update host token and mark as active
-          db.prepare(`
-            UPDATE rooms 
-            SET host_token = ?, last_active = CURRENT_TIMESTAMP 
-            WHERE room_id = ?
-          `).run(hostToken || room.host_token, room.room_id);
-          
-          return {
-            success: true,
-            roomId: room.room_id,
-            isHost: true,
-            joinUrl: `${BASE_URL}/controller.html?room=${room.room_id}`,
-            hostToken: hostToken || room.host_token
-          };
-        }
-      });
+      // Join as host
+      socket.join(roomId);
+      socket.currentRoom = roomId;
       
-      // Execute transaction
-      const result = transaction();
-      
-      if (result) {
-        // Join the socket room
-        socket.join(room.room_id);
-        socket.currentRoom = room.room_id;
-        
-        // Emit join response
-        socket.emit('joinResponse', result);
-        
-        // Broadcast room update
-        const players = db.prepare(`
-          SELECT * FROM room_players 
-          WHERE room_id = ? AND is_connected = 1
-        `).all(room.room_id);
-        
-        io.to(room.room_id).emit('roomUpdate', {
-          roomId: room.room_id,
-          players: players,
-          status: room.status
-        });
+      // If host is reconnecting, update their connection status
+      if (room.players[socket.id]) {
+        room.players[socket.id].connected = true;
+      } else {
+        // Add new host (should only happen if original host disconnected)
+        room.players[socket.id] = {
+          id: socket.id,
+          name: 'Host',
+          connected: true,
+          isHost: true
+        };
       }
       
-    } catch (error) {
-      console.error('Room join error:', error);
-      socket.emit('joinResponse', { 
-        success: false, 
-        message: 'Error joining room',
-        roomId: roomId 
+      // Send success response
+      socket.emit('joinResponse', {
+        success: true,
+        roomId: roomId,
+        isHost: true,
+        gameState: room.status === 'playing' ? room.gameState : null
+      });
+      
+      // Broadcast room update
+      broadcastRoomUpdate(roomId);
+      return;
+    }
+    
+    // Handle joining as spectator
+    if (isSpectator) {
+      socket.join(roomId);
+      socket.currentRoom = roomId;
+      
+      socket.emit('joinResponse', {
+        success: true,
+        roomId: roomId,
+        isSpectator: true,
+        gameState: room.status === 'playing' ? room.gameState : null
+      });
+      
+      return;
+    }
+    
+    // Handle joining as controller (player)
+    if (isController) {
+      const playerName = name || `Player ${Object.keys(room.players).length + 1}`;
+      
+      // Check if we already have this player
+      if (room.players[socket.id]) {
+        // Update existing player
+        room.players[socket.id].connected = true;
+        room.players[socket.id].name = playerName;
+      } else {
+        // Add new player
+        room.players[socket.id] = {
+          id: socket.id,
+          name: playerName,
+          connected: true,
+          isHost: false
+        };
+        
+        // Initialize cup state for new player
+        room.gameState.cups[socket.id] = Array(6).fill(true);
+      }
+      
+      // Join socket room
+      socket.join(roomId);
+      socket.currentRoom = roomId;
+      
+      // Send success response
+      socket.emit('joinResponse', {
+        success: true,
+        roomId: roomId,
+        playerInfo: room.players[socket.id],
+        gameState: room.status === 'playing' ? room.gameState : null
+      });
+      
+      // Broadcast room update
+      broadcastRoomUpdate(roomId);
+      return;
+    }
+    
+    // If we get here, the request didn't specify a valid join type
+    socket.emit('joinResponse', {
+      success: false,
+      message: 'Invalid join request',
+      roomId: roomId
+    });
+  });
+  
+  // Start Game
+  socket.on('startGame', (roomId) => {
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+    
+    // Check if socket is host
+    const player = room.players[socket.id];
+    if (!player || !player.isHost) {
+      socket.emit('error', 'Only the host can start the game');
+      return;
+    }
+    
+    // Get active players
+    const activePlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
+    
+    if (activePlayers.length === 0) {
+      socket.emit('error', 'Need at least one player to start');
+      return;
+    }
+    
+    // Set game to playing state
+    room.status = 'playing';
+    
+    // Select first player randomly
+    const firstPlayer = activePlayers[Math.floor(Math.random() * activePlayers.length)];
+    
+    // Initialize cup states for all players if not already done
+    activePlayers.forEach(player => {
+      if (!room.gameState.cups[player.id]) {
+        room.gameState.cups[player.id] = Array(6).fill(true);
+      }
+      // Initialize scores
+      room.gameState.scores[player.id] = 0;
+    });
+    
+    // Send game started event to all clients
+    io.to(roomId).emit('gameStarted', {
+      firstPlayer: firstPlayer.id,
+      firstPlayerName: firstPlayer.name,
+      gameState: room.gameState
+    });
+    
+    // Update room list (no longer joinable as new room)
+    io.emit('roomList', getPublicRoomList());
+  });
+  
+  // Handle throw
+  socket.on('throw', (data) => {
+    const { roomId, velocity } = data;
+    const room = gameRooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+    
+    // Forward throw to all clients in room
+    socket.to(roomId).emit('throw', data);
+  });
+  
+  // Handle cup hit
+  socket.on('cupHit', (data) => {
+    const { roomId, cupIndex, playerId, remainingCups } = data;
+    const room = gameRooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+    
+    // Update cup state
+    if (room.gameState.cups[playerId]) {
+      room.gameState.cups[playerId][cupIndex] = false;
+      
+      // Check if player has lost (all cups hit)
+      const playerLost = room.gameState.cups[playerId].every(cup => !cup);
+      
+      // Update scores - award a point to the active player
+      const activePlayers = Object.values(room.players)
+        .filter(p => p.connected && !p.isHost)
+        .filter(p => p.id !== playerId); // Exclude the player who was hit
+      
+      // Get the active player (the one who's not the hit player)
+      if (activePlayers.length > 0) {
+        const activePlayer = activePlayers[0];
+        room.gameState.scores[activePlayer.id] = (room.gameState.scores[activePlayer.id] || 0) + 1;
+      }
+      
+      if (playerLost) {
+        // Check if game is over
+        handleGameEnd(room, roomId);
+      } else {
+        // Change turn
+        const activePlayer = Object.values(room.players)
+          .find(p => p.connected && p.id === playerId);
+        
+        if (activePlayer) {
+          io.to(roomId).emit('turnChange', {
+            activePlayer: activePlayer,
+            gameState: room.gameState
+          });
+        }
+      }
+    }
+  });
+  
+  // Handle cup miss
+  socket.on('cupMiss', (data) => {
+    const { roomId } = data;
+    const room = gameRooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+    
+    // Find next player for turn
+    const activePlayers = Object.values(room.players)
+      .filter(p => p.connected && !p.isHost);
+    
+    if (activePlayers.length >= 2) {
+      // Simple round-robin: find current active player and select next
+      const currentActiveIdx = activePlayers.findIndex(p => p.id === room.activePlayerId);
+      const nextIdx = (currentActiveIdx + 1) % activePlayers.length;
+      const nextPlayer = activePlayers[nextIdx];
+      
+      // Update active player
+      room.activePlayerId = nextPlayer.id;
+      
+      // Send turn change event
+      io.to(roomId).emit('turnChange', {
+        activePlayer: nextPlayer,
+        gameState: room.gameState
       });
     }
+  });
+  
+  // Reset game
+  socket.on('resetGame', (roomId) => {
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+    
+    // Check if socket is host
+    const player = room.players[socket.id];
+    if (!player || !player.isHost) {
+      socket.emit('error', 'Only the host can reset the game');
+      return;
+    }
+    
+    // Reset game state
+    room.status = 'waiting';
+    room.gameState = {
+      round: 1,
+      cups: {},
+      scores: {}
+    };
+    
+    // Reset cup states for all players
+    Object.keys(room.players).forEach(playerId => {
+      room.gameState.cups[playerId] = Array(6).fill(true);
+    });
+    
+    // Notify all clients
+    io.to(roomId).emit('gameReset');
+    
+    // Update room list (now joinable again)
+    io.emit('roomList', getPublicRoomList());
   });
   
   // Handle disconnection
   socket.on('disconnect', () => {
     if (socket.currentRoom) {
-      try {
+      const roomId = socket.currentRoom;
+      const room = gameRooms.get(roomId);
+      
+      if (room && room.players[socket.id]) {
         // Mark player as disconnected
-        db.prepare(`
-          UPDATE room_players 
-          SET is_connected = 0 
-          WHERE room_id = ? AND player_id = ?
-        `).run(socket.currentRoom, socket.id);
+        room.players[socket.id].connected = false;
         
-        // Check if room is now empty
-        const remainingPlayers = db.prepare(`
-          SELECT COUNT(*) as count 
-          FROM room_players 
-          WHERE room_id = ? AND is_connected = 1
-        `).get(socket.currentRoom).count;
+        // If host disconnected and game is waiting, close the room
+        const isHost = room.players[socket.id].isHost;
         
-        // Cleanup empty rooms
-        cleanupEmptyRooms();
+        if (isHost && room.status === 'waiting') {
+          // Close room
+          io.to(roomId).emit('roomClosed', { message: 'Host disconnected' });
+          gameRooms.delete(roomId);
+        } else if (room.status === 'playing') {
+          // Handle player disconnect during game
+          // If active player disconnected, switch to next
+          const currentActiveId = room.activePlayerId;
+          
+          if (currentActiveId === socket.id) {
+            // Find next player
+            const activePlayers = Object.values(room.players)
+              .filter(p => p.connected && !p.isHost);
+            
+            if (activePlayers.length > 0) {
+              const nextPlayer = activePlayers[0];
+              room.activePlayerId = nextPlayer.id;
+              
+              io.to(roomId).emit('playerDisconnected', {
+                playerId: socket.id,
+                activePlayer: nextPlayer
+              });
+            } else {
+              // No more active players, reset game
+              room.status = 'waiting';
+              io.to(roomId).emit('gameReset');
+            }
+          } else {
+            // Not active player, just notify
+            io.to(roomId).emit('playerDisconnected', {
+              playerId: socket.id
+            });
+          }
+        }
         
-        // Update room list for lobby
-        const remainingRooms = db.prepare(`
-          SELECT r.room_id, r.status, 
-                 COUNT(rp.player_id) as player_count
-          FROM rooms r
-          LEFT JOIN room_players rp ON r.room_id = rp.room_id AND rp.is_connected = 1
-          WHERE r.status = 'waiting'
-          GROUP BY r.room_id
-        `).all().map(room => ({
-          id: room.room_id,
-          status: room.status,
-          players: Array(room.player_count).fill({})
-        }));
-        
-        io.emit('roomList', remainingRooms);
-      } catch (error) {
-        console.error('Disconnection handling error:', error);
+        // Broadcast room update
+        broadcastRoomUpdate(roomId);
       }
+      
+      // Update room list
+      io.emit('roomList', getPublicRoomList());
     }
   });
 });
+
+// Helper function to handle game end
+function handleGameEnd(room, roomId) {
+  // Get scores
+  const scores = room.gameState.scores;
+  
+  // Find player with highest score
+  let highestScore = 0;
+  let winners = [];
+  
+  Object.entries(scores).forEach(([playerId, score]) => {
+    if (score > highestScore) {
+      highestScore = score;
+      winners = [room.players[playerId]];
+    } else if (score === highestScore) {
+      winners.push(room.players[playerId]);
+    }
+  });
+  
+  // Check if we have a tie
+  const isTie = winners.length > 1;
+  
+  // Send win event
+  io.to(roomId).emit('playerWon', {
+    player: winners[0],
+    isTie: isTie,
+    tiedPlayers: isTie ? winners : null,
+    scores: scores
+  });
+  
+  // Reset game state but keep room open
+  room.status = 'ended';
+}
 
 // Start the server
 const PORT = process.env.PORT || 3001;
