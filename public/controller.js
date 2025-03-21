@@ -359,22 +359,26 @@ function setupEventListeners() {
 function submitName() {
   if (joiningInProgress) return;
   
+  // Get the player name with a fallback
   const playerName = nameInput.value.trim() || 'Player';
   
   if (playerName) {
+    // Show joining in progress
     joiningInProgress = true;
     nameSubmit.disabled = true;
     nameSubmit.textContent = 'Joining...';
     
-    console.log(`Joining room ${roomId} as controller with name: ${playerName}`);
+    console.log(`===== JOINING AS CONTROLLER =====`);
+    console.log(`Room ID: ${roomId}`);
+    console.log(`Player Name: ${playerName}`);
     
-    // CRITICAL FIX: Explicitly join as a controller with correct parameters
+    // CRITICAL: Join the room as a controller with explicit parameters
     socket.emit('joinRoom', {
       roomId: roomId,
       name: playerName,
-      isController: true,  // Must be true to be counted as a player
-      isHost: false,       // Must be false since this is a player
-      isSpectator: false   // Must be false to participate
+      isController: true,
+      isHost: false,
+      isSpectator: false
     });
     
     // Add timeout to prevent UI from getting stuck
@@ -443,10 +447,11 @@ socket.on('error', (errorMessage) => {
 });
 
 socket.on('joinResponse', (data) => {
+  console.log('Received join response:', data);
   joiningInProgress = false;
   
   if (data.success) {
-    log('Successfully joined room as controller:', data);
+    console.log('Successfully joined room as controller!');
     
     // Hide the name form and show game controls
     nameForm.style.display = 'none';
@@ -456,6 +461,8 @@ socket.on('joinResponse', (data) => {
     roomCodeDisplay.textContent = data.roomId;
     playerInfo = data.playerInfo;
     playerNameDisplay.textContent = playerInfo.name;
+    
+    console.log(`Player info:`, playerInfo);
     
     // Setup the game
     if (data.gameState && data.gameState.cups && data.gameState.cups[playerInfo.id]) {
@@ -481,6 +488,7 @@ socket.on('joinResponse', (data) => {
       waitingSubMessage.textContent = 'The host will start the game when all players are ready';
     }
   } else {
+    console.error(`Failed to join: ${data.message}`);
     alert(`Failed to join game: ${data.message}`);
     nameSubmit.disabled = false;
     nameSubmit.textContent = 'Join Game';

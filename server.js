@@ -210,14 +210,20 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', (data) => {
     const { roomId, name, isController, isHost, isSpectator, hostToken } = data;
     
-    logDebug(`Join request for room ${roomId} by ${socket.id} as ${isHost ? 'host' : (isController ? 'controller' : 'spectator')}`);
-    logDebug(`Available rooms:`, Array.from(gameRooms.keys()));
+    // EXTENSIVE LOGGING for debugging
+    console.log(`=== JOIN REQUEST ===`);
+    console.log(`Room ID: ${roomId}`);
+    console.log(`Socket ID: ${socket.id}`);
+    console.log(`Is Controller: ${isController}`);
+    console.log(`Is Host: ${isHost}`);
+    console.log(`Is Spectator: ${isSpectator}`);
+    console.log(`Player Name: ${name || 'Not provided'}`);
+    console.log(`Available rooms: ${Array.from(gameRooms.keys())}`);
     
     // Validate room exists
     const room = gameRooms.get(roomId);
     if (!room) {
-      logDebug(`Room not found: ${roomId}`);
-      console.error(`Room not found: ${roomId}`);
+      console.log(`Room not found: ${roomId}`);
       socket.emit('joinResponse', { 
         success: false, 
         message: 'Room not found. It may have expired or been closed.',
@@ -226,110 +232,41 @@ io.on('connection', (socket) => {
       return;
     }
     
-    logDebug(`Room ${roomId} found, processing join request`);
+    console.log(`Room ${roomId} found, processing join request`);
     
     // Update room activity timestamp
     room.lastActivity = Date.now();
     
-    // Handle joining as host
-    if (isHost) {
-      // Clear host disconnection time since we have a host now
-      room.hostDisconnectedAt = null;
-      
-      // Validate host token if provided
-      if (hostToken && room.hostToken !== hostToken) {
-        socket.emit('joinResponse', {
-          success: false,
-          message: 'Invalid host token',
-          roomId: roomId
-        });
-        return;
-      }
-      
-      // Join socket room
-      socket.join(roomId);
-      socket.currentRoom = roomId;
-      socket.hostRoom = roomId; // Track that this is a host socket
-      
-      // If host is reconnecting, update their connection status
-      if (room.players[socket.id]) {
-        room.players[socket.id].connected = true;
-      } else {
-        // Add new host (should only happen if original host disconnected)
-        room.players[socket.id] = {
-          id: socket.id,
-          name: 'Host',
-          connected: true,
-          isHost: true
-        };
-      }
-      
-      logDebug(`Host joined room ${roomId} successfully`);
-      
-      // Send success response
-      socket.emit('joinResponse', {
-        success: true,
-        roomId: roomId,
-        isHost: true,
-        gameState: room.status === 'playing' ? room.gameState : null
-      });
-      
-      // Broadcast room update
-      broadcastRoomUpdate(roomId);
-      return;
-    }
-    
-    // Handle joining as spectator
-    if (isSpectator) {
-      socket.join(roomId);
-      socket.currentRoom = roomId;
-      
-      logDebug(`Spectator joined room ${roomId}`);
-      
-      socket.emit('joinResponse', {
-        success: true,
-        roomId: roomId,
-        isSpectator: true,
-        gameState: room.status === 'playing' ? room.gameState : null
-      });
-      
-      return;
-    }
-    
-    // Handle joining as controller (player)
+    // Handle controller (player) joining
     if (isController) {
       const playerName = name || `Player ${Object.keys(room.players).length + 1}`;
+      console.log(`Adding controller player: ${playerName} (${socket.id})`);
       
-      // Check if we already have this player
-      if (room.players[socket.id]) {
-        // Update existing player
-        room.players[socket.id].connected = true;
-        room.players[socket.id].name = playerName;
-      } else {
-        // Add new player
-        room.players[socket.id] = {
-          id: socket.id,
-          name: playerName,
-          connected: true,
-          isHost: false
-        };
-        
-        // Initialize cup state for new player
-        room.gameState.cups[socket.id] = Array(6).fill(true);
-      }
+      // Add new player
+      room.players[socket.id] = {
+        id: socket.id,
+        name: playerName,
+        connected: true,
+        isHost: false
+      };
+      
+      // Initialize cup state for new player
+      room.gameState.cups[socket.id] = Array(6).fill(true);
       
       // Join socket room
       socket.join(roomId);
       socket.currentRoom = roomId;
       
-      console.log(`Controller joined room ${roomId} as ${playerName}`);
-      console.log(`Room players:`, Object.keys(room.players).length);
+      console.log(`Players in room:`, Object.keys(room.players).map(id => {
+        const p = room.players[id];
+        return `${p.name}(${id}) - connected: ${p.connected}, host: ${p.isHost}`;
+      }));
       
-      // Count connected players
+      // Count non-host connected players
       const connectedPlayers = Object.values(room.players).filter(p => p.connected && !p.isHost);
-      console.log(`Room ${roomId} now has ${connectedPlayers.length} connected players`);
+      console.log(`Room ${roomId} has ${connectedPlayers.length} connected players (non-host)`);
       
-      // Send success response
+      // Send success response to controller
       socket.emit('joinResponse', {
         success: true,
         roomId: roomId,
@@ -337,7 +274,7 @@ io.on('connection', (socket) => {
         gameState: room.status === 'playing' ? room.gameState : null
       });
       
-      // CRITICAL FIX: Send updated room data to all clients in the room
+      // Send updated player list to ALL clients in room immediately
       const playerList = Object.values(room.players).map(p => ({
         id: p.id,
         name: p.name,
@@ -345,7 +282,7 @@ io.on('connection', (socket) => {
         isHost: p.isHost
       }));
       
-      // Send direct update to all clients in the room
+      // Broadcast to all clients in the room including the new player
       io.to(roomId).emit('roomUpdate', {
         roomId: roomId,
         players: playerList,
