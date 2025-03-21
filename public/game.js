@@ -4,6 +4,8 @@ const roomId = urlParams.get('room');
 const isHost = urlParams.get('host') === 'true';
 const isSpectator = urlParams.get('spectator') === 'true';
 
+const hostToken = isHost ? localStorage.getItem('hostToken') : null;
+
 if (!roomId) {
   alert('No room ID provided.');
   window.location.href = '/';
@@ -526,7 +528,8 @@ ballBody.addEventListener('collide', (event) => {
       socket.emit('joinRoom', {
         roomId: roomId,
         isHost: isHost,
-        isController: false
+        isController: false,
+        hostToken: hostToken  // Send the host token for verification
       });
     }
   });

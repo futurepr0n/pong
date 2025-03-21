@@ -12,7 +12,13 @@ createRoomBtn.addEventListener('click', () => {
   createRoomBtn.disabled = true;
   loadingElement.style.display = 'block';
   
-  socket.emit('createRoom');
+  // Generate a unique host token that will persist across page navigation
+  const hostToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+  
+  // Store the host token in localStorage
+  localStorage.setItem('hostToken', hostToken);
+  
+  socket.emit('createRoom', { hostToken });
 });
 
 // Handle Room Creation Response

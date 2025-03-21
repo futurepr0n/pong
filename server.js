@@ -8,6 +8,7 @@ app.use(express.static('public'));
 
 // Game rooms storage
 const gameRooms = new Map();
+const hostTokens = new Map(); // Map to store host tokens -> roomIds
 
 // Base URL for QR codes - use environment variable or default to localhost
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3001';
@@ -54,13 +55,15 @@ io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
   
   // Handle room creation
-  socket.on('createRoom', () => {
+  socket.on('createRoom', (data) => {
     const roomId = generateRoomId();
     const joinUrl = `${BASE_URL}/controller.html?room=${roomId}`;
+    const hostToken = data?.hostToken || null;
     
     gameRooms.set(roomId, {
       id: roomId,
       host: socket.id,
+      hostToken: hostToken, // Store the host token with the room
       players: [],
       spectators: [],
       status: 'waiting',
@@ -72,6 +75,11 @@ io.on('connection', (socket) => {
       },
       created: Date.now() // Add timestamp for room cleanup
     });
+    
+    // Map the host token to room ID for easier lookup
+    if (hostToken) {
+      hostTokens.set(hostToken, roomId);
+    }
     
     socket.join(roomId);
     socket.currentRoom = roomId; // Store room ID on socket for disconnect handling
@@ -87,7 +95,7 @@ io.on('connection', (socket) => {
       .filter(room => room.status === 'waiting')
       .map(r => getRoomData(r)));
     
-    console.log(`Room created: ${roomId} by ${socket.id}`);
+    console.log(`Room created: ${roomId} by ${socket.id} ${hostToken ? '(with host token)' : ''}`);
   });
   
   // Handle getting room list
@@ -99,8 +107,17 @@ io.on('connection', (socket) => {
   
   // Handle player joining a room
   socket.on('joinRoom', (data) => {
-    const { roomId, name, isController, isHost } = data;
-    const room = gameRooms.get(roomId);
+    const { roomId, name, isController, isHost, hostToken } = data;
+    let room = gameRooms.get(roomId);
+    
+    // If no room found directly but we have a host token, try to find the room using the token
+    if (!room && hostToken) {
+      const tokenRoomId = hostTokens.get(hostToken);
+      if (tokenRoomId) {
+        room = gameRooms.get(tokenRoomId);
+        console.log(`Found room ${tokenRoomId} using host token`);
+      }
+    }
     
     if (!room) {
       socket.emit('joinResponse', { success: false, message: 'Room not found' });
@@ -174,8 +191,19 @@ io.on('connection', (socket) => {
     } else {
       // Host or spectator joining
       if (isHost) {
-        // Update host ID
-        room.host = socket.id;
+        // Verify host token if provided
+        if (hostToken && room.hostToken === hostToken) {
+          // Valid host token, update host ID
+          room.host = socket.id;
+          console.log(`Host reconnected to room ${roomId} using token`);
+        } else if (!room.hostToken) {
+          // No token validation needed, update host ID
+          room.host = socket.id;
+        } else {
+          console.log(`Warning: Host token mismatch for room ${roomId}`);
+          // Still allow joining, but log the warning
+          room.host = socket.id;
+        }
       } else {
         // Add spectator if not already in the list
         if (!room.spectators.includes(socket.id)) {
@@ -663,4 +691,3 @@ http.listen(PORT, () => {
 console.log(`Server running on port ${PORT}`);
 console.log(`Open a browser and navigate to http://localhost:${PORT}`);
 });
-
