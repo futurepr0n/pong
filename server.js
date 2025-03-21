@@ -2,7 +2,6 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http);
-const { v4: uuidv4 } = require('uuid');
 
 // Serve static files from the current directory
 app.use(express.static('.'));
@@ -10,7 +9,7 @@ app.use(express.static('.'));
 // Game rooms storage
 const gameRooms = new Map();
 
-// Helper function to generate room ID
+// Helper function to generate room ID (without using uuid)
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
@@ -32,7 +31,8 @@ io.on('connection', (socket) => {
   // Handle room creation
   socket.on('createRoom', () => {
     const roomId = generateRoomId();
-    const joinUrl = `${process.env.BASE_URL || `http://localhost:${PORT}`}/controller.html?room=${roomId}`;
+    const port = process.env.PORT || 3000;
+    const joinUrl = `${process.env.BASE_URL || `http://localhost:${port}`}/controller.html?room=${roomId}`;
     
     gameRooms.set(roomId, {
       id: roomId,
@@ -332,7 +332,7 @@ function advanceToNextPlayer(room) {
 }
 
 // Start the server
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 http.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
