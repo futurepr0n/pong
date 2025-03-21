@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ping Pong Throw Game - Lobby</title>
+  <title>Beer Pong Throw Game - Lobby</title>
   <style>
     body {
       font-family: 'Arial', sans-serif;
@@ -71,56 +71,35 @@
     .join-btn:hover {
       background-color: #0b7dda;
     }
-    .modal {
+    .loading {
       display: none;
-      position: fixed;
-      z-index: 1;
-      left: 0;
-      top: 0;
-      width: 100%;
-      height: 100%;
-      background-color: rgba(0,0,0,0.4);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .modal-content {
-      background-color: white;
-      padding: 20px;
-      border-radius: 5px;
-      max-width: 500px;
-      width: 80%;
-      text-align: center;
-    }
-    .close {
-      color: #aaa;
-      float: right;
-      font-size: 28px;
-      font-weight: bold;
-      cursor: pointer;
-    }
-    .close:hover {
-      color: black;
-    }
-    .qr-container {
-      margin: 20px 0;
-    }
-    #qrcode {
-      margin: 0 auto;
-      width: 200px;
-      height: 200px;
-    }
-    .room-info {
-      margin-bottom: 15px;
       font-size: 18px;
-      font-weight: bold;
+      margin-bottom: 20px;
+    }
+    .spinner {
+      border: 4px solid #f3f3f3;
+      border-top: 4px solid #4CAF50;
+      border-radius: 50%;
+      width: 30px;
+      height: 30px;
+      animation: spin 2s linear infinite;
+      margin: 0 auto 15px auto;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Ping Pong Throw Game</h1>
+    <h1>Beer Pong Throw Game</h1>
     <button class="create-room-btn" id="createRoomBtn">Create Game Room</button>
+    
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+      <div>Creating room...</div>
+    </div>
     
     <div class="room-list" id="roomList">
       <h2>Active Game Rooms</h2>
@@ -133,23 +112,7 @@
     </div>
   </div>
 
-  <!-- QR Code Modal -->
-  <div class="modal" id="qrModal">
-    <div class="modal-content">
-      <span class="close" id="closeModal">&times;</span>
-      <h2>Join Game Room</h2>
-      <div class="room-info" id="roomInfo">Room: <span id="roomId"></span></div>
-      <p>Scan this QR code with your phone to join as a player:</p>
-      <div class="qr-container">
-        <div id="qrcode"></div>
-      </div>
-      <p>Waiting for players to join... (<span id="playerCount">0</span>/10)</p>
-      <button id="startGameBtn" disabled>Start Game</button>
-    </div>
-  </div>
-
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="lobby.js"></script>
 </body>
 </html>

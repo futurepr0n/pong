@@ -14,6 +14,7 @@ const nameSubmit = document.getElementById('nameSubmit');
 const gameControls = document.getElementById('gameControls');
 const waitingOverlay = document.getElementById('waitingOverlay');
 const waitingMessage = document.getElementById('waitingMessage');
+const waitingSubMessage = document.getElementById('waitingSubMessage');
 const throwButton = document.getElementById('throwButton');
 const statusDisplay = document.getElementById('statusDisplay');
 const roomCodeDisplay = document.getElementById('roomCode');
@@ -21,6 +22,7 @@ const playerNameDisplay = document.getElementById('playerName');
 const roundDisplay = document.getElementById('roundDisplay');
 const turnDisplay = document.getElementById('turnDisplay');
 const cupDisplay = document.getElementById('cupDisplay');
+const cupInfo = document.getElementById('cupInfo');
 const debugElement = document.getElementById('debugElement');
 
 // Game state
@@ -29,6 +31,7 @@ let isMyTurn = false;
 let isThrowing = false;
 let cupState = Array(6).fill(true);
 let motionPermissionGranted = false;
+let gameStarted = false;
 
 // Orientation tracking
 let initialOrientation = { beta: 0, gamma: 0 };
@@ -43,11 +46,13 @@ const socket = io();
 
 // Update debug display with orientation data
 function updateDebug() {
-  debugElement.textContent = `Current: β=${currentOrientation.beta.toFixed(1)}° γ=${currentOrientation.gamma.toFixed(1)}°`;
-  if (isThrowing) {
-    const betaDiff = currentOrientation.beta - initialOrientation.beta;
-    const gammaDiff = currentOrientation.gamma - initialOrientation.gamma;
-    debugElement.textContent += `\nDiff: β=${betaDiff.toFixed(1)}° γ=${gammaDiff.toFixed(1)}°`;
+  if (debugElement.style.display !== 'none') {
+    debugElement.textContent = `Current: β=${currentOrientation.beta.toFixed(1)}° γ=${currentOrientation.gamma.toFixed(1)}°`;
+    if (isThrowing) {
+      const betaDiff = currentOrientation.beta - initialOrientation.beta;
+      const gammaDiff = currentOrientation.gamma - initialOrientation.gamma;
+      debugElement.textContent += `\nDiff: β=${betaDiff.toFixed(1)}° γ=${gammaDiff.toFixed(1)}°`;
+    }
   }
 }
 
@@ -60,6 +65,9 @@ function setupCupDisplay() {
     cup.dataset.index = i;
     cupDisplay.appendChild(cup);
   }
+  
+  // Update cup info
+  updateCupInfo();
 }
 
 // Update cup display based on current state
@@ -72,6 +80,16 @@ function updateCupDisplay() {
       cup.classList.add('hit');
     }
   });
+  
+  // Update cup info
+  updateCupInfo();
+}
+
+// Update cup count info
+function updateCupInfo() {
+  const remainingCups = cupState.filter(cup => cup).length;
+  const totalCups = cupState.length;
+  cupInfo.textContent = `Your cups: ${remainingCups}/${totalCups} remaining`;
 }
 
 // Handle iOS permissions correctly
@@ -204,6 +222,9 @@ throwButton.addEventListener('touchstart', (e) => {
   lastOrientationTime = throwStartTime;
   
   statusDisplay.textContent = 'Hold and swing your phone to throw...';
+  
+  // Visual feedback for throwing
+  throwButton.style.backgroundColor = '#f44336'; // Red while holding
 });
 
 // End throw and calculate trajectory
@@ -211,6 +232,9 @@ throwButton.addEventListener('touchend', (e) => {
   e.preventDefault();
   if (!isThrowing) return;
   isThrowing = false;
+  
+  // Reset button color
+  throwButton.style.backgroundColor = '#4CAF50';
   
   const throwEndTime = Date.now();
   const throwDuration = (throwEndTime - throwStartTime) / 1000; // in seconds
@@ -229,6 +253,7 @@ throwButton.addEventListener('touchend', (e) => {
   
   console.log('Beta difference:', betaDiff);
   console.log('Gamma difference:', gammaDiff);
+  console.log('Throw duration:', throwDuration);
   
   // Direct conversion of orientation change to velocity
   // X velocity is based on gamma change (left/right tilt)
@@ -244,8 +269,8 @@ throwButton.addEventListener('touchend', (e) => {
     yVelocity = Math.max(5 - betaDiff * 0.15, 2);
   }
   
-  // Z velocity scales with total motion
-  const zVelocity = 6 + Math.min(totalChange * 0.1, 4);
+  // Z velocity scales with total motion and is influenced by throw duration
+  const zVelocity = 6 + Math.min(totalChange * 0.1, 4) + (3 / (throwDuration + 0.5));
   
   // Final velocity calculation
   const velocity = {
@@ -263,6 +288,15 @@ throwButton.addEventListener('touchend', (e) => {
     velocity: velocity
   });
   
+  // Try to play a sound effect
+  try {
+    const throwSound = new Audio('https://actions.google.com/sounds/v1/sports/tennis_ball_hit.ogg');
+    throwSound.volume = 0.4;
+    throwSound.play();
+  } catch (e) {
+    console.log('Sound not available');
+  }
+  
   // Disable throw button until server confirms turn change
   throwButton.disabled = true;
   isMyTurn = false;
@@ -273,12 +307,22 @@ nameSubmit.addEventListener('click', () => {
   const playerName = nameInput.value.trim() || 'Player';
   
   if (playerName) {
+    nameSubmit.disabled = true;
+    nameSubmit.textContent = 'Joining...';
+    
     // Join the room as a controller
     socket.emit('joinRoom', {
       roomId: roomId,
       name: playerName,
       isController: true
     });
+  }
+});
+
+// Enter key also submits name
+nameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    nameSubmit.click();
   }
 });
 
@@ -299,8 +343,20 @@ socket.on('joinResponse', (data) => {
     playerNameDisplay.textContent = playerInfo.name;
     
     // Setup the game
+    if (data.gameState && data.gameState.cups && data.gameState.cups[playerInfo.id]) {
+      cupState = data.gameState.cups[playerInfo.id];
+    }
     setupCupDisplay();
     setupMotionPermission();
+    
+    // Update document title
+    document.title = `Game Controller - ${playerInfo.name}`;
+    
+    // If game already started, update waiting overlay message
+    if (data.gameState && data.gameState.round > 1) {
+      waitingMessage.textContent = 'Game already in progress';
+      waitingSubMessage.textContent = 'Please wait for your turn';
+    }
   } else {
     alert(`Failed to join game: ${data.message}`);
     window.location.href = '/';
@@ -310,19 +366,43 @@ socket.on('joinResponse', (data) => {
 socket.on('gameStarted', (data) => {
   // Hide the waiting overlay
   waitingOverlay.style.display = 'none';
+  gameStarted = true;
   
   // Check if it's this player's turn
   if (data.firstPlayer === socket.id) {
     isMyTurn = true;
     throwButton.disabled = false;
+    throwButton.classList.add('your-turn-alert');
     statusDisplay.textContent = 'Your turn! Hold to throw.';
     turnDisplay.textContent = 'Your Turn';
+    
+    // Change background color for visual feedback
+    document.body.style.backgroundColor = '#e8f5e9'; // Light green when it's your turn
+    
+    // Try to play a sound effect
+    try {
+      const yourTurnSound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+      yourTurnSound.volume = 0.3;
+      yourTurnSound.play();
+    } catch (e) {
+      console.log('Sound not available');
+    }
   } else {
     isMyTurn = false;
     throwButton.disabled = true;
-    statusDisplay.textContent = 'Waiting for your turn...';
-    turnDisplay.textContent = 'Other Player';
+    throwButton.classList.remove('your-turn-alert');
+    
+    // Find the active player name
+    const activePlayerName = data.firstPlayerName || 'Other Player';
+    statusDisplay.textContent = `Waiting for ${activePlayerName}'s turn...`;
+    turnDisplay.textContent = activePlayerName;
+    
+    // Reset background color
+    document.body.style.backgroundColor = '#f0f0f0';
   }
+  
+  // Update round display
+  roundDisplay.textContent = '1';
 });
 
 socket.on('turnChange', (data) => {
@@ -330,13 +410,34 @@ socket.on('turnChange', (data) => {
   if (data.activePlayer.id === socket.id) {
     isMyTurn = true;
     throwButton.disabled = false;
+    throwButton.classList.add('your-turn-alert');
     statusDisplay.textContent = 'Your turn! Hold to throw.';
     turnDisplay.textContent = 'Your Turn';
+    
+    // Add visual feedback that it's your turn
+    document.body.style.backgroundColor = '#e8f5e9'; // Light green background
+    setTimeout(() => {
+      document.body.style.backgroundColor = '#f0f0f0'; // Back to normal after 1 second
+    }, 1000);
+    
+    // Try to play a notification sound
+    try {
+      const yourTurnSound = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+      yourTurnSound.volume = 0.3;
+      yourTurnSound.play();
+    } catch (e) {
+      console.log('Sound not available');
+    }
   } else {
     isMyTurn = false;
     throwButton.disabled = true;
+    throwButton.classList.remove('your-turn-alert');
+    
     statusDisplay.textContent = `Waiting for ${data.activePlayer.name}'s turn...`;
     turnDisplay.textContent = data.activePlayer.name;
+    
+    // Reset background color
+    document.body.style.backgroundColor = '#f0f0f0';
   }
   
   // Update cup state if available for this player
@@ -351,21 +452,127 @@ socket.on('turnChange', (data) => {
   }
 });
 
+socket.on('newRound', (data) => {
+  roundDisplay.textContent = data.round;
+  
+  // Display new round notification
+  const roundAlert = document.createElement('div');
+  roundAlert.textContent = `Round ${data.round} started!`;
+  roundAlert.style.position = 'fixed';
+  roundAlert.style.top = '50%';
+  roundAlert.style.left = '50%';
+  roundAlert.style.transform = 'translate(-50%, -50%)';
+  roundAlert.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+  roundAlert.style.color = 'white';
+  roundAlert.style.padding = '20px';
+  roundAlert.style.borderRadius = '10px';
+  roundAlert.style.fontSize = '24px';
+  roundAlert.style.zIndex = '1000';
+  
+  document.body.appendChild(roundAlert);
+  
+  // Remove the alert after 2 seconds
+  setTimeout(() => {
+    document.body.removeChild(roundAlert);
+  }, 2000);
+});
+
 socket.on('playerWon', (data) => {
   const winner = data.player;
   const isWinner = winner.id === socket.id;
   
+  waitingOverlay.style.display = 'flex';
+  
   if (isWinner) {
-    waitingOverlay.style.display = 'flex';
     waitingMessage.textContent = '🏆 You Won! 🏆';
+    waitingSubMessage.textContent = 'Congratulations!';
+    
+    // Try to play victory sound
+    try {
+      const winSound = new Audio('https://actions.google.com/sounds/v1/sports/crowd_cheer.ogg');
+      winSound.volume = 0.5;
+      winSound.play();
+    } catch (e) {
+      console.log('Sound not available');
+    }
+  } else if (data.isTie && data.tiedPlayers && data.tiedPlayers.some(p => p.id === socket.id)) {
+    waitingMessage.textContent = '🏆 It\'s a Tie! 🏆';
+    waitingSubMessage.textContent = 'Congratulations!';
+    
+    // Try to play victory sound
+    try {
+      const winSound = new Audio('https://actions.google.com/sounds/v1/sports/crowd_cheer.ogg');
+      winSound.volume = 0.5;
+      winSound.play();
+    } catch (e) {
+      console.log('Sound not available');
+    }
   } else {
-    waitingOverlay.style.display = 'flex';
     waitingMessage.textContent = `${winner.name} Won!`;
+    waitingSubMessage.textContent = 'Game Over';
+  }
+  
+  // Display final scores if available
+  if (data.scores) {
+    const scoresDiv = document.createElement('div');
+    scoresDiv.style.marginTop = '20px';
+    scoresDiv.style.fontSize = '16px';
+    scoresDiv.style.textAlign = 'left';
+    
+    const scoresList = document.createElement('ol');
+    
+    // Create a sorted array of players by score
+    const playerScores = Object.keys(data.scores).map(id => {
+      const playerName = id === socket.id ? 'You' : 
+        (players && players.find(p => p.id === id)?.name || 'Player');
+      
+      return {
+        name: playerName,
+        score: data.scores[id]
+      };
+    }).sort((a, b) => b.score - a.score);
+    
+    // Add scores to the list
+    playerScores.forEach(player => {
+      const scoreItem = document.createElement('li');
+      scoreItem.textContent = `${player.name}: ${player.score} points`;
+      scoresList.appendChild(scoreItem);
+    });
+    
+    scoresDiv.appendChild(document.createElement('h3')).textContent = 'Final Scores:';
+    scoresDiv.appendChild(scoresList);
+    waitingSubMessage.parentNode.insertBefore(scoresDiv, waitingSubMessage.nextSibling);
   }
   
   // Disable throwing
   isMyTurn = false;
   throwButton.disabled = true;
+});
+
+socket.on('gameReset', () => {
+  // Reset states
+  cupState = Array(6).fill(true);
+  updateCupDisplay();
+  
+  // Show waiting overlay
+  waitingOverlay.style.display = 'flex';
+  waitingMessage.textContent = 'Game Reset';
+  waitingSubMessage.textContent = 'Waiting for game to start...';
+  
+  // Remove any score display that might have been added
+  const scoresDiv = document.querySelector('#waitingOverlay div:nth-child(4)');
+  if (scoresDiv) {
+    scoresDiv.remove();
+  }
+  
+  // Reset turn and game state
+  isMyTurn = false;
+  throwButton.disabled = true;
+  gameStarted = false;
+  roundDisplay.textContent = '1';
+  
+  // Reset background
+  document.body.style.backgroundColor = '#f0f0f0';
 });
 
 socket.on('roomClosed', () => {
@@ -375,5 +582,6 @@ socket.on('roomClosed', () => {
 
 socket.on('disconnect', () => {
   waitingOverlay.style.display = 'flex';
-  waitingMessage.textContent = 'Disconnected from server. Trying to reconnect...';
+  waitingMessage.textContent = 'Disconnected from server';
+  waitingSubMessage.textContent = 'Trying to reconnect...';
 });

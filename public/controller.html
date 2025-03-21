@@ -16,6 +16,7 @@
       font-family: Arial, sans-serif;
       position: relative;
       overflow: hidden;
+      transition: background-color 0.5s;
     }
     #throwButton {
       width: 80%;
@@ -67,10 +68,12 @@
       border-radius: 0 0 15px 15px;
       background-color: red;
       position: relative;
+      transition: all 0.3s ease;
     }
     .cup.hit {
       background-color: #ccc;
       opacity: 0.5;
+      transform: scale(0.8);
     }
     /* Overlay for waiting state */
     #waitingOverlay {
@@ -92,6 +95,10 @@
     #waitingMessage {
       font-size: 24px;
       margin-bottom: 20px;
+    }
+    #waitingSubMessage {
+      font-size: 16px;
+      opacity: 0.8;
     }
     .spinner {
       border: 5px solid #f3f3f3;
@@ -128,6 +135,19 @@
       font-size: 16px;
       cursor: pointer;
     }
+    #cupInfo {
+      margin: 10px 0;
+      font-weight: bold;
+      color: #444;
+    }
+    .your-turn-alert {
+      animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+      100% { transform: scale(1); }
+    }
   </style>
 </head>
 <body>
@@ -146,6 +166,7 @@
     </div>
     
     <div id="cupDisplay"></div>
+    <div id="cupInfo"></div>
     
     <button id="throwButton" disabled>Hold to Throw</button>
     <div id="statusDisplay">Waiting for your turn...</div>
@@ -160,6 +181,7 @@
   <div id="waitingOverlay">
     <div class="spinner"></div>
     <div id="waitingMessage">Waiting for game to start...</div>
+    <div id="waitingSubMessage">The host will start the game when all players are ready</div>
   </div>
 
   <!-- Debug element -->

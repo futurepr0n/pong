@@ -3,68 +3,27 @@ const socket = io();
 
 // DOM Elements
 const createRoomBtn = document.getElementById('createRoomBtn');
-const qrModal = document.getElementById('qrModal');
-const closeModal = document.getElementById('closeModal');
-const roomIdSpan = document.getElementById('roomId');
-const playerCountSpan = document.getElementById('playerCount');
-const startGameBtn = document.getElementById('startGameBtn');
 const roomsContainer = document.getElementById('roomsContainer');
-
-// Variables
-let currentRoomId = null;
-let isHost = false;
+const loadingElement = document.getElementById('loading');
 
 // Create Room Button Click
 createRoomBtn.addEventListener('click', () => {
+  // Show loading indicator
+  createRoomBtn.disabled = true;
+  loadingElement.style.display = 'block';
+  
   socket.emit('createRoom');
-});
-
-// Close Modal Button Click
-closeModal.addEventListener('click', () => {
-  if (isHost && currentRoomId) {
-    if (confirm("Are you sure you want to close this room? All connections will be lost.")) {
-      socket.emit('closeRoom', currentRoomId);
-      hideModal();
-    }
-  } else {
-    hideModal();
-  }
-});
-
-// Start Game Button Click
-startGameBtn.addEventListener('click', () => {
-  if (isHost && currentRoomId) {
-    // We should redirect to the game.html page with the room ID
-    window.location.href = `/game.html?room=${currentRoomId}&host=true`;
-  }
 });
 
 // Handle Room Creation Response
 socket.on('roomCreated', (data) => {
-  currentRoomId = data.roomId;
-  isHost = true;
-  showRoomQR(data.roomId, data.joinUrl);
-  updatePlayerCount(data.players.length);
-  startGameBtn.disabled = false; // Enable start button even for single player
+  // Redirect to the game page with the room ID
+  window.location.href = `/game.html?room=${data.roomId}&host=true`;
 });
 
 // Handle Room List Update
 socket.on('roomList', (rooms) => {
   updateRoomList(rooms);
-});
-
-// Handle Player Count Update
-socket.on('playerCountUpdate', (data) => {
-  if (data.roomId === currentRoomId) {
-    updatePlayerCount(data.count);
-  }
-});
-
-// Handle Game Start
-socket.on('gameStarted', (data) => {
-  if (data.roomId === currentRoomId && isHost) {
-    window.location.href = `/game.html?room=${currentRoomId}&host=true`;
-  }
 });
 
 // Function to update the list of available rooms
@@ -95,37 +54,25 @@ function updateRoomList(rooms) {
   });
 }
 
-// Function to show QR code modal
-function showRoomQR(roomId, joinUrl) {
-  roomIdSpan.textContent = roomId;
-  
-  // Generate QR code
-  const qrContainer = document.getElementById('qrcode');
-  qrContainer.innerHTML = '';
-  
-  new QRCode(qrContainer, {
-    text: joinUrl,
-    width: 200,
-    height: 200,
-    colorDark: "#000000",
-    colorLight: "#ffffff",
-    correctLevel: QRCode.CorrectLevel.H
-  });
-  
-  qrModal.style.display = 'flex';
-}
+// Handle connection issues
+socket.on('disconnect', () => {
+  createRoomBtn.disabled = false;
+  loadingElement.style.display = 'none';
+  alert('Disconnected from server. Please refresh the page.');
+});
 
-// Function to hide the modal
-function hideModal() {
-  qrModal.style.display = 'none';
-  currentRoomId = null;
-  isHost = false;
-}
+socket.on('connect', () => {
+  console.log('Connected to server');
+  createRoomBtn.disabled = false;
+  loadingElement.style.display = 'none';
+});
 
-// Function to update player count
-function updatePlayerCount(count) {
-  playerCountSpan.textContent = count;
-}
+// Handle errors
+socket.on('error', (errorMessage) => {
+  alert(`Error: ${errorMessage}`);
+  createRoomBtn.disabled = false;
+  loadingElement.style.display = 'none';
+});
 
 // Initial request for room list
 socket.emit('getRoomList');

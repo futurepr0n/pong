@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Ping Pong Throw Game</title>
+  <title>Beer Pong Throw Game</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     body { 
@@ -54,9 +54,74 @@
       background-color: #cccccc;
       cursor: not-allowed;
     }
+
+    /* QR Code Modal */
+    #qrModal {
+      display: none;
+      position: fixed;
+      z-index: 10;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.7);
+      align-items: center;
+      justify-content: center;
+    }
+    .qr-modal-content {
+      background-color: white;
+      padding: 20px;
+      border-radius: 5px;
+      max-width: 500px;
+      width: 80%;
+      text-align: center;
+    }
+    .qr-container {
+      margin: 20px 0;
+    }
+    #qrcode {
+      margin: 0 auto;
+      width: 200px;
+      height: 200px;
+    }
+    .player-list {
+      margin-top: 15px;
+      max-height: 150px;
+      overflow-y: auto;
+      text-align: left;
+    }
+    #closeQRModal {
+      margin-top: 15px;
+    }
   </style>
 </head>
 <body>
+  <!-- QR Code Modal -->
+  <div id="qrModal" class="modal">
+    <div class="qr-modal-content">
+      <h2>Join Game Room</h2>
+      <div>Room ID: <span id="qrRoomID"></span></div>
+      <div class="qr-container">
+        <div id="qrcode"></div>
+      </div>
+      <p>Scan this QR code with your phone to join</p>
+      <div>Connected players: <span id="playerCount">0</span></div>
+      <div class="player-list" id="playerListContainer"></div>
+      <button id="startGameBtn">Start Game</button>
+      <button id="closeQRModal">Close</button>
+    </div>
+  </div>
+
+  <!-- Winner Modal -->
+  <div id="winnerModal" class="modal">
+    <div class="modal-content">
+      <div class="winner-announcement" id="winnerText"></div>
+      <div id="finalScores"></div>
+      <button id="newGameBtn">New Game</button>
+      <button id="returnToLobbyBtn">Return to Lobby</button>
+    </div>
+  </div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.1/socket.io.min.js"></script>
