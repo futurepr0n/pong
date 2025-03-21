@@ -252,6 +252,7 @@ showQRButton.style.zIndex = '100';
 showQRButton.style.display = isHost ? 'block' : 'none';
 showQRButton.addEventListener('click', () => {
   qrModal.style.display = 'flex';
+  showQRCode();
 });
 document.body.appendChild(showQRButton);
 
@@ -380,32 +381,33 @@ function loadPlayerCups(playerId) {
 
 // Show QR code for joining
 function showQRCode() {
-  if (isHost) {
-    qrRoomID.textContent = roomId;
-    
-    // Generate QR code
-    qrcode.innerHTML = '';
-    const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
-    
-    new QRCode(qrcode, {
-      text: joinUrl,
-      width: 200,
-      height: 200,
-      colorDark: "#000000",
-      colorLight: "#ffffff",
-      correctLevel: QRCode.CorrectLevel.H
-    });
-    
-    // Add link text below QR
-    const linkEl = document.createElement('div');
-    linkEl.style.marginTop = '10px';
-    linkEl.style.wordBreak = 'break-all';
-    linkEl.innerHTML = `<a href="${joinUrl}" target="_blank">${joinUrl}</a>`;
-    qrcode.appendChild(linkEl);
-    
-    qrModal.style.display = 'flex';
-    updatePlayerListInModal();
-  }
+    if (isHost) {
+      // Clear any existing QR code
+      qrcode.innerHTML = '';
+      qrRoomID.textContent = roomId;
+      
+      // Generate QR code
+      const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
+      
+      new QRCode(qrcode, {
+        text: joinUrl,
+        width: 200,
+        height: 200,
+        colorDark: "#000000",
+        colorLight: "#ffffff",
+        correctLevel: QRCode.CorrectLevel.H
+      });
+      
+      // Add link text below QR
+      const linkEl = document.createElement('div');
+      linkEl.style.marginTop = '10px';
+      linkEl.style.wordBreak = 'break-all';
+      linkEl.innerHTML = `<a href="${joinUrl}" target="_blank">${joinUrl}</a>`;
+      qrcode.appendChild(linkEl);
+      
+      qrModal.style.display = 'flex';
+      updatePlayerListInModal();
+    }
 }
 
 // Collision detection for cups
@@ -541,6 +543,11 @@ ballBody.addEventListener('collide', (event) => {
     } else {
       // Successfully joined the room
       console.log('Joined room:', data.roomId);
+      
+      // If host, show QR code
+      if (isHost) {
+        showQRCode();
+      }
     }
   });
   

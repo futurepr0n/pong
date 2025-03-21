@@ -7,15 +7,14 @@ const Database = require('better-sqlite3');
 // Open the database
 const db = new Database('game_rooms.db', { verbose: console.log });
 
-// Create tables with foreign key support
-db.prepare(`
-  PRAGMA foreign_keys = ON;
-`).run();
+// Enable foreign key support
+db.prepare(`PRAGMA foreign_keys = ON;`).run();
 
+// Create tables
 db.prepare(`
   CREATE TABLE IF NOT EXISTS rooms (
     room_id TEXT PRIMARY KEY,
-    host_token TEXT,
+    host_token TEXT UNIQUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     status TEXT DEFAULT 'waiting',
     last_active DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -34,15 +33,38 @@ db.prepare(`
   )
 `).run();
 
-// Serve static files from the public directory
+// Serve static files
 app.use(express.static('public'));
 
-// Base URL for QR codes - use environment variable or default to localhost
+// Base URL for QR codes
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3001';
 
-// Helper function to generate room ID (without using uuid)
+// Generate room ID
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+// Clean up empty rooms
+function cleanupEmptyRooms() {
+  const transaction = db.transaction(() => {
+    // Remove rooms with no connected players
+    const cleanupStmt = db.prepare(`
+      DELETE FROM rooms 
+      WHERE room_id NOT IN (
+        SELECT DISTINCT room_id 
+        FROM room_players 
+        WHERE is_connected = 1
+      ) AND status = 'waiting'
+    `);
+    cleanupStmt.run();
+  });
+  
+  try {
+    transaction();
+    console.log('Cleaned up empty rooms');
+  } catch (error) {
+    console.error('Room cleanup error:', error);
+  }
 }
 
 // Socket.io connection handling
@@ -52,31 +74,34 @@ io.on('connection', (socket) => {
   // Create a new room
   socket.on('createRoom', (data) => {
     const roomId = generateRoomId();
-    const hostToken = (data && data.hostToken) || 
+    const hostToken = data.hostToken || 
       Math.random().toString(36).substring(2, 15) + 
       Math.random().toString(36).substring(2, 15);
     
-    const transaction = db.transaction(() => {
-      // Insert room into database
-      const insertRoom = db.prepare(`
-        INSERT INTO rooms (room_id, host_token, status) 
-        VALUES (?, ?, 'waiting')
-      `);
-      insertRoom.run(roomId, hostToken);
-      
-      // Insert host as a player
-      const insertPlayer = db.prepare(`
-        INSERT INTO room_players (room_id, player_id, name, is_host) 
-        VALUES (?, ?, ?, 1)
-      `);
-      insertPlayer.run(roomId, socket.id, 'Host');
-      
-      return roomId;
-    });
-    
     try {
+      // Start a transaction to ensure atomic room and player creation
+      const transaction = db.transaction(() => {
+        // Insert room
+        const insertRoom = db.prepare(`
+          INSERT INTO rooms (room_id, host_token, status) 
+          VALUES (?, ?, 'waiting')
+        `);
+        insertRoom.run(roomId, hostToken);
+        
+        // Insert host as a player
+        const insertPlayer = db.prepare(`
+          INSERT INTO room_players (room_id, player_id, name, is_host) 
+          VALUES (?, ?, ?, 1)
+        `);
+        insertPlayer.run(roomId, socket.id, 'Host');
+        
+        return roomId;
+      });
+      
+      // Execute the transaction
       const createdRoomId = transaction();
       
+      // Join the room socket
       socket.join(createdRoomId);
       socket.currentRoom = createdRoomId;
       
@@ -126,23 +151,15 @@ io.on('connection', (socket) => {
     const { roomId, name, isController, isHost, hostToken } = data;
     
     try {
-      // Find the room, optionally by host token
-      let room;
-      if (hostToken) {
-        room = db.prepare(`
-          SELECT * FROM rooms 
-          WHERE room_id = ? OR host_token = ?
-        `).get(roomId, hostToken);
-      } else {
-        room = db.prepare(`
-          SELECT * FROM rooms 
-          WHERE room_id = ?
-        `).get(roomId);
-      }
+      // Find the room
+      let room = db.prepare(`
+        SELECT * FROM rooms 
+        WHERE room_id = ?
+      `).get(roomId);
       
       // Room not found
       if (!room) {
-        console.error(`Room not found: ${roomId}, Host Token: ${hostToken}`);
+        console.error(`Room not found: ${roomId}`);
         socket.emit('joinResponse', { 
           success: false, 
           message: 'Room not found. It may have expired or been closed.',
@@ -196,10 +213,10 @@ io.on('connection', (socket) => {
             isController: true
           };
         } else if (isHost) {
-          // Update host information
+          // Update host token and mark as active
           db.prepare(`
             UPDATE rooms 
-            SET host_token = ? 
+            SET host_token = ?, last_active = CURRENT_TIMESTAMP 
             WHERE room_id = ?
           `).run(hostToken || room.host_token, room.room_id);
           
@@ -207,7 +224,8 @@ io.on('connection', (socket) => {
             success: true,
             roomId: room.room_id,
             isHost: true,
-            joinUrl: `${BASE_URL}/controller.html?room=${room.room_id}`
+            joinUrl: `${BASE_URL}/controller.html?room=${room.room_id}`,
+            hostToken: hostToken || room.host_token
           };
         }
       });
@@ -219,13 +237,6 @@ io.on('connection', (socket) => {
         // Join the socket room
         socket.join(room.room_id);
         socket.currentRoom = room.room_id;
-        
-        // Update last active timestamp
-        db.prepare(`
-          UPDATE rooms 
-          SET last_active = CURRENT_TIMESTAMP 
-          WHERE room_id = ?
-        `).run(room.room_id);
         
         // Emit join response
         socket.emit('joinResponse', result);
@@ -253,29 +264,6 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Periodic cleanup of old rooms
-  function cleanupRooms() {
-    const transaction = db.transaction(() => {
-      // Remove rooms older than 1 hour and not in active status
-      // This will cascade delete room_players due to ON DELETE CASCADE
-      const cleanupStmt = db.prepare(`
-        DELETE FROM rooms 
-        WHERE status = 'waiting' AND 
-        last_active < datetime('now', '-1 hour')
-      `);
-      cleanupStmt.run();
-    });
-    
-    try {
-      transaction();
-    } catch (error) {
-      console.error('Room cleanup error:', error);
-    }
-  }
-  
-  // Run cleanup every 15 minutes
-  setInterval(cleanupRooms, 15 * 60 * 1000);
-  
   // Handle disconnection
   socket.on('disconnect', () => {
     if (socket.currentRoom) {
@@ -296,7 +284,7 @@ io.on('connection', (socket) => {
         
         // If no players are connected, remove the room
         if (remainingPlayers === 0) {
-          // This will automatically remove associated players due to CASCADE
+          // Delete room and associated players
           db.prepare(`
             DELETE FROM rooms 
             WHERE room_id = ?
@@ -306,6 +294,25 @@ io.on('connection', (socket) => {
       
       try {
         transaction();
+        
+        // Cleanup empty rooms
+        cleanupEmptyRooms();
+        
+        // Update room list for lobby
+        const remainingRooms = db.prepare(`
+          SELECT r.room_id, r.status, 
+                 COUNT(rp.player_id) as player_count
+          FROM rooms r
+          LEFT JOIN room_players rp ON r.room_id = rp.room_id AND rp.is_connected = 1
+          WHERE r.status = 'waiting'
+          GROUP BY r.room_id
+        `).all().map(room => ({
+          id: room.room_id,
+          status: room.status,
+          players: Array(room.player_count).fill({})
+        }));
+        
+        io.emit('roomList', remainingRooms);
       } catch (error) {
         console.error('Disconnection handling error:', error);
       }
