@@ -1,28 +1,78 @@
-const socket = io();
+// Get room ID from URL parameters
+const urlParams = new URLSearchParams(window.location.search);
+const roomId = urlParams.get('room');
+
+if (!roomId) {
+  alert('No room ID provided. Please use the QR code to join a game.');
+  window.location.href = '/';
+}
+
+// DOM Elements
+const nameForm = document.getElementById('nameForm');
+const nameInput = document.getElementById('nameInput');
+const nameSubmit = document.getElementById('nameSubmit');
+const gameControls = document.getElementById('gameControls');
+const waitingOverlay = document.getElementById('waitingOverlay');
+const waitingMessage = document.getElementById('waitingMessage');
 const throwButton = document.getElementById('throwButton');
 const statusDisplay = document.getElementById('statusDisplay');
+const roomCodeDisplay = document.getElementById('roomCode');
+const playerNameDisplay = document.getElementById('playerName');
+const roundDisplay = document.getElementById('roundDisplay');
+const turnDisplay = document.getElementById('turnDisplay');
+const cupDisplay = document.getElementById('cupDisplay');
+const debugElement = document.getElementById('debugElement');
 
-// State variables
+// Game state
+let playerInfo = null;
+let isMyTurn = false;
+let isThrowing = false;
+let cupState = Array(6).fill(true);
+let motionPermissionGranted = false;
+
+// Orientation tracking
 let initialOrientation = { beta: 0, gamma: 0 };
 let currentOrientation = { beta: 0, gamma: 0 };
-let isThrowing = false;
 let throwStartTime = 0;
 let orientationHistory = [];
 let lastOrientationTime = 0;
 let velocityReadings = [];
-let motionPermissionGranted = false;
 
-// Debug display
-const debugElement = document.createElement('div');
-debugElement.style.position = 'absolute';
-debugElement.style.bottom = '10px';
-debugElement.style.left = '10px';
-debugElement.style.backgroundColor = 'rgba(255,255,255,0.7)';
-debugElement.style.padding = '5px';
-debugElement.style.fontFamily = 'monospace';
-debugElement.style.fontSize = '12px';
-debugElement.style.color = '#333';
-document.body.appendChild(debugElement);
+// Connect to Socket.io server
+const socket = io();
+
+// Update debug display with orientation data
+function updateDebug() {
+  debugElement.textContent = `Current: β=${currentOrientation.beta.toFixed(1)}° γ=${currentOrientation.gamma.toFixed(1)}°`;
+  if (isThrowing) {
+    const betaDiff = currentOrientation.beta - initialOrientation.beta;
+    const gammaDiff = currentOrientation.gamma - initialOrientation.gamma;
+    debugElement.textContent += `\nDiff: β=${betaDiff.toFixed(1)}° γ=${gammaDiff.toFixed(1)}°`;
+  }
+}
+
+// Setup cup display
+function setupCupDisplay() {
+  cupDisplay.innerHTML = '';
+  for (let i = 0; i < 6; i++) {
+    const cup = document.createElement('div');
+    cup.className = 'cup' + (cupState[i] ? '' : ' hit');
+    cup.dataset.index = i;
+    cupDisplay.appendChild(cup);
+  }
+}
+
+// Update cup display based on current state
+function updateCupDisplay() {
+  const cups = cupDisplay.querySelectorAll('.cup');
+  cups.forEach((cup, index) => {
+    if (cupState[index]) {
+      cup.classList.remove('hit');
+    } else {
+      cup.classList.add('hit');
+    }
+  });
+}
 
 // Handle iOS permissions correctly
 function setupMotionPermission() {
@@ -54,7 +104,7 @@ function setupMotionPermission() {
           // Permission granted, remove button and initialize
           permissionButton.remove();
           motionPermissionGranted = true;
-          statusDisplay.textContent = 'Motion permission granted. Hold to throw.';
+          statusDisplay.textContent = 'Motion permission granted. Waiting for your turn.';
           
           // Now start listening for orientation events
           initOrientationTracking();
@@ -68,7 +118,7 @@ function setupMotionPermission() {
     };
     
     // Add button to page
-    document.body.insertBefore(permissionButton, throwButton);
+    gameControls.insertBefore(permissionButton, throwButton);
     
   } else {
     // Non-iOS or older iOS that doesn't need permission
@@ -77,20 +127,14 @@ function setupMotionPermission() {
   }
 }
 
-// Initialize orientation tracking only after permission is granted
+// Initialize orientation tracking
 function initOrientationTracking() {
   window.addEventListener('deviceorientation', (event) => {
     // Update current orientation values
     if (event.beta !== null) currentOrientation.beta = event.beta;
     if (event.gamma !== null) currentOrientation.gamma = event.gamma;
     
-    // Update debug display
-    debugElement.textContent = `Current: β=${currentOrientation.beta.toFixed(1)}° γ=${currentOrientation.gamma.toFixed(1)}°`;
-    if (isThrowing) {
-      const betaDiff = currentOrientation.beta - initialOrientation.beta;
-      const gammaDiff = currentOrientation.gamma - initialOrientation.gamma;
-      debugElement.textContent += `\nDiff: β=${betaDiff.toFixed(1)}° γ=${gammaDiff.toFixed(1)}°`;
-    }
+    updateDebug();
     
     // If we're tracking a throw, record the data points
     if (isThrowing) {
@@ -134,6 +178,11 @@ function initOrientationTracking() {
 // Start throw
 throwButton.addEventListener('touchstart', (e) => {
   e.preventDefault();
+  
+  if (!isMyTurn) {
+    statusDisplay.textContent = 'Wait for your turn to throw.';
+    return;
+  }
   
   if (!motionPermissionGranted) {
     statusDisplay.textContent = 'Motion permission required. Enable motion control first.';
@@ -182,14 +231,10 @@ throwButton.addEventListener('touchend', (e) => {
   console.log('Gamma difference:', gammaDiff);
   
   // Direct conversion of orientation change to velocity
-  // This is simpler and more reliable than complex calculations
-  
   // X velocity is based on gamma change (left/right tilt)
-  // Negative gamma = throw right, positive gamma = throw left
   const xVelocity = gammaDiff * -0.3; // Invert and scale
   
   // Y velocity is based on beta change (forward/back tilt)
-  // Negative beta diff = more upward throw, positive = more downward
   let yVelocity;
   if (betaDiff < 0) {
     // Phone tilted more upward = higher throw
@@ -209,33 +254,126 @@ throwButton.addEventListener('touchend', (e) => {
     z: zVelocity
   };
   
-  // Log detailed throw data
-  console.log('Throw analysis:', {
-    duration: throwDuration.toFixed(2) + 's',
-    orientation: {
-      start: { beta: initialOrientation.beta.toFixed(1), gamma: initialOrientation.gamma.toFixed(1) },
-      end: { beta: currentOrientation.beta.toFixed(1), gamma: currentOrientation.gamma.toFixed(1) },
-      change: { beta: betaDiff.toFixed(1), gamma: gammaDiff.toFixed(1) }
-    },
-    totalChange: totalChange.toFixed(1),
-    samples: orientationHistory.length,
+  // Display throw info
+  statusDisplay.textContent = `Throw sent: ${totalChange.toFixed(1)}° motion`;
+  
+  // Send throw data to server with room ID
+  socket.emit('throw', {
+    roomId: roomId,
     velocity: velocity
   });
   
-  // Display throw info
-  statusDisplay.textContent = `Throw: ${totalChange.toFixed(1)}° motion`;
-  
-  // Send throw data to server
-  socket.emit('throw', velocity);
+  // Disable throw button until server confirms turn change
+  throwButton.disabled = true;
+  isMyTurn = false;
 });
 
-// Connection feedback
+// Handle name submission
+nameSubmit.addEventListener('click', () => {
+  const playerName = nameInput.value.trim() || 'Player';
+  
+  if (playerName) {
+    // Join the room as a controller
+    socket.emit('joinRoom', {
+      roomId: roomId,
+      name: playerName,
+      isController: true
+    });
+  }
+});
+
+// Socket.io event handlers
 socket.on('connect', () => {
-  statusDisplay.textContent = 'Connected to server. Ready for setup.';
-  // Initialize permissions after connection
-  setupMotionPermission();
+  console.log('Connected to server');
+});
+
+socket.on('joinResponse', (data) => {
+  if (data.success) {
+    // Hide the name form and show game controls
+    nameForm.style.display = 'none';
+    gameControls.style.display = 'flex';
+    
+    // Update displays
+    roomCodeDisplay.textContent = data.roomId;
+    playerInfo = data.playerInfo;
+    playerNameDisplay.textContent = playerInfo.name;
+    
+    // Setup the game
+    setupCupDisplay();
+    setupMotionPermission();
+  } else {
+    alert(`Failed to join game: ${data.message}`);
+    window.location.href = '/';
+  }
+});
+
+socket.on('gameStarted', (data) => {
+  // Hide the waiting overlay
+  waitingOverlay.style.display = 'none';
+  
+  // Check if it's this player's turn
+  if (data.firstPlayer === socket.id) {
+    isMyTurn = true;
+    throwButton.disabled = false;
+    statusDisplay.textContent = 'Your turn! Hold to throw.';
+    turnDisplay.textContent = 'Your Turn';
+  } else {
+    isMyTurn = false;
+    throwButton.disabled = true;
+    statusDisplay.textContent = 'Waiting for your turn...';
+    turnDisplay.textContent = 'Other Player';
+  }
+});
+
+socket.on('turnChange', (data) => {
+  // Update turn info
+  if (data.activePlayer.id === socket.id) {
+    isMyTurn = true;
+    throwButton.disabled = false;
+    statusDisplay.textContent = 'Your turn! Hold to throw.';
+    turnDisplay.textContent = 'Your Turn';
+  } else {
+    isMyTurn = false;
+    throwButton.disabled = true;
+    statusDisplay.textContent = `Waiting for ${data.activePlayer.name}'s turn...`;
+    turnDisplay.textContent = data.activePlayer.name;
+  }
+  
+  // Update cup state if available for this player
+  if (data.gameState && data.gameState.cups && data.gameState.cups[socket.id]) {
+    cupState = data.gameState.cups[socket.id];
+    updateCupDisplay();
+  }
+  
+  // Update round if provided
+  if (data.gameState && data.gameState.round) {
+    roundDisplay.textContent = data.gameState.round;
+  }
+});
+
+socket.on('playerWon', (data) => {
+  const winner = data.player;
+  const isWinner = winner.id === socket.id;
+  
+  if (isWinner) {
+    waitingOverlay.style.display = 'flex';
+    waitingMessage.textContent = '🏆 You Won! 🏆';
+  } else {
+    waitingOverlay.style.display = 'flex';
+    waitingMessage.textContent = `${winner.name} Won!`;
+  }
+  
+  // Disable throwing
+  isMyTurn = false;
+  throwButton.disabled = true;
+});
+
+socket.on('roomClosed', () => {
+  alert('The game room has been closed.');
+  window.location.href = '/';
 });
 
 socket.on('disconnect', () => {
-  statusDisplay.textContent = 'Disconnected from server.';
+  waitingOverlay.style.display = 'flex';
+  waitingMessage.textContent = 'Disconnected from server. Trying to reconnect...';
 });

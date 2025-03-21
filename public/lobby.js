@@ -34,7 +34,8 @@ closeModal.addEventListener('click', () => {
 // Start Game Button Click
 startGameBtn.addEventListener('click', () => {
   if (isHost && currentRoomId) {
-    socket.emit('startGame', currentRoomId);
+    // We should redirect to the game.html page with the room ID
+    window.location.href = `/game.html?room=${currentRoomId}&host=true`;
   }
 });
 
@@ -44,7 +45,7 @@ socket.on('roomCreated', (data) => {
   isHost = true;
   showRoomQR(data.roomId, data.joinUrl);
   updatePlayerCount(data.players.length);
-  startGameBtn.disabled = data.players.length === 0;
+  startGameBtn.disabled = false; // Enable start button even for single player
 });
 
 // Handle Room List Update
@@ -56,7 +57,6 @@ socket.on('roomList', (rooms) => {
 socket.on('playerCountUpdate', (data) => {
   if (data.roomId === currentRoomId) {
     updatePlayerCount(data.count);
-    startGameBtn.disabled = data.count === 0;
   }
 });
 

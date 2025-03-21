@@ -9,6 +9,9 @@ app.use(express.static('public'));
 // Game rooms storage
 const gameRooms = new Map();
 
+// Base URL for QR codes
+const BASE_URL = process.env.BASE_URL || 'https://pong.futurepr0n.com';
+
 // Helper function to generate room ID (without using uuid)
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -31,8 +34,7 @@ io.on('connection', (socket) => {
   // Handle room creation
   socket.on('createRoom', () => {
     const roomId = generateRoomId();
-    const port = process.env.PORT || 3000;
-    const joinUrl = `${process.env.BASE_URL || `http://localhost:${port}`}/controller.html?room=${roomId}`;
+    const joinUrl = `${BASE_URL}/controller.html?room=${roomId}`;
     
     gameRooms.set(roomId, {
       id: roomId,
@@ -148,6 +150,7 @@ io.on('connection', (socket) => {
       return;
     }
     
+    // Allow single player mode
     if (room.players.length === 0) {
       socket.emit('error', 'Cannot start game without players');
       return;
@@ -332,8 +335,8 @@ function advanceToNextPlayer(room) {
 }
 
 // Start the server
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 http.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
-  console.log('Open a browser and navigate to http://localhost:${PORT}');
+  console.log(`Open a browser and navigate to ${BASE_URL}`);
 });

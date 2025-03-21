@@ -328,7 +328,7 @@ function checkBallReset() {
     resetBall();
     
     // Notify server that the throw missed
-    if (isHost && activePlayer) {
+    if (isHost && activePlayer && gameStarted) {
       socket.emit('cupMiss', { roomId });
       gameStatus.textContent = `${activePlayer.name}'s throw missed!`;
     }
@@ -407,7 +407,7 @@ ballBody.addEventListener('collide', (event) => {
 
 // Start button click handler
 startButton.addEventListener('click', () => {
-  if (isHost && players.length > 0) {
+  if (isHost) {
     socket.emit('startGame', roomId);
     startButton.style.display = 'none';
     qrContainer.style.display = 'none';
@@ -416,6 +416,8 @@ startButton.addEventListener('click', () => {
 
 // Socket.io event handlers
 socket.on('connect', () => {
+  console.log('Connected to server');
+  
   if (isHost || isSpectator) {
     // Join the room without being a controller
     socket.emit('joinRoom', {
@@ -429,7 +431,7 @@ socket.on('joinResponse', (data) => {
   if (data.success) {
     if (isHost) {
       // Generate QR code for joining
-      const joinUrl = `${window.location.origin}/controller.html?room=${roomId}`;
+      const joinUrl = `https://pong.futurepr0n.com/controller.html?room=${roomId}`;
       
       if (typeof QRCode !== 'undefined') {
         new QRCode(document.getElementById('qrcode'), {
