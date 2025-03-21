@@ -2,14 +2,15 @@ const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room');
 const isHost = urlParams.get('host') === 'true';
 const isSpectator = urlParams.get('spectator') === 'true';
-const hostToken = urlParams.get('token') || localStorage.getItem(`hostToken_${roomId}`);
+const hostToken = urlParams.get('token');
+
 
 if (!roomId) {
   alert('No room ID provided.');
   window.location.href = '/';
 }
 
-
+const socket = io();
 
 // Scene setup
 const scene = new THREE.Scene();
@@ -171,8 +172,6 @@ const ballBody = new CANNON.Body({
 ballBody.position.set(0, 1, -3); // Starting position
 world.addBody(ballBody);
 
-// Socket.io connection
-const socket = io();
 
 // Game state variables
 let gameStarted = false;
@@ -528,23 +527,23 @@ ballBody.addEventListener('collide', (event) => {
       socket.emit('joinRoom', {
         roomId: roomId,
         isHost: isHost,
-        isController: false,
+        isController: !isSpectator && !isHost,
         hostToken: hostToken
       });
     }
   });
   
   socket.on('joinResponse', (data) => {
-    if (data.success) {
-      // If we're the host, show the QR code
-      if (isHost) {
-        showQRCode();
-      }
-    } else {
-      alert(`Failed to join game: ${data.message}`);
+    if (!data.success) {
+      // Show error and redirect
+      alert(data.message || 'Failed to join the game room.');
       window.location.href = '/';
+    } else {
+      // Successfully joined the room
+      console.log('Joined room:', data.roomId);
     }
   });
+  
   
   socket.on('roomUpdate', (data) => {
     players = data.players;
